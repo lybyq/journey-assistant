@@ -50,8 +50,8 @@ onUnmounted(() => cancelAnimationFrame(frame));
 </template>
 <!-- 对话使用自然段落布局，避免在每句话外面套卡片。 -->
 <style scoped>
-/** 对话区域占满可用高度，同时保留独立滚动。 */
-.thread { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 2px 30px; scrollbar-width: thin; scrollbar-color: #cdd8ca transparent; }
+/** 相对定位把读屏状态限制在消息滚动容器内，长历史不会撑出外层页面。 */
+.thread { position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 12px 2px 30px; scrollbar-width: thin; scrollbar-color: #cdd8ca transparent; }
 /** 更早消息采用轻量入口，保持正文为主要阅读平面。 */
 .history-more { display: block; margin: 0 auto 24px; padding: 9px 18px; border: 1px solid var(--line); border-radius: 18px; color: var(--forest); font-size: 11px; }
 /** 图标与正文之间保留适中间距。 */

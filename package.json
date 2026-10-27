@@ -1,0 +1,37 @@
+{
+  "name": "journey-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.6",
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "scripts": {
+    "storage:setup": "pnpm --filter @journey/contracts build && pnpm --filter @journey/api build && node apps/api/dist/scripts/setup-local.js && docker compose -f infra/compose.yaml up -d --wait",
+    "storage:up": "docker compose -f infra/compose.yaml up -d --wait",
+    "storage:down": "docker compose -f infra/compose.yaml stop",
+    "db:migrate": "pnpm --filter @journey/contracts build && pnpm --filter @journey/api build && node apps/api/dist/scripts/migrate.js",
+    "dev": "pnpm --filter @journey/contracts build && concurrently -k -n TYPES,API,WEB \"pnpm --filter @journey/contracts dev\" \"pnpm --filter @journey/api dev\" \"pnpm --filter @journey/web dev\"",
+    "dev:api": "pnpm --filter @journey/contracts build && pnpm --filter @journey/api dev",
+    "dev:web": "pnpm --filter @journey/web dev",
+    "build": "pnpm --filter @journey/contracts build && pnpm --filter @journey/api build && pnpm --filter @journey/web build",
+    "typecheck": "pnpm --filter @journey/contracts build && pnpm -r typecheck && tsc -p tsconfig.tests.json",
+    "test": "pnpm --filter @journey/contracts build && pnpm --filter @journey/api build && vitest run",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@journey/contracts": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.0",
+    "concurrently": "^9.2.1",
+    "jsdom": "^30.1.3",
+    "pg": "8.23.1",
+    "redis": "6.3.0",
+    "typescript": "6.0.3",
+    "vite": "8.3.5",
+    "vitest": "5.0.5",
+    "ws": "^8.18.3"
+  }
+}

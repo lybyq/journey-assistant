@@ -1,0 +1,150 @@
+/** 运行标识由服务端安全生成，客户端请求标识仅用于幂等。 */
+import { randomUUID } from 'node:crypto';
+/** 业务异常以稳定HTTP状态对外表达。 */
+import { ConflictException, HttpException, Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+/** 参数化查询与事务只访问应用拥有的连接池。 */
+import type { PoolClient } from 'pg';
+/** 统一校验持久化事件、运行和快照。 */
+import { serverEventSchema, persistedRunSchema, conversationSnapshotSchema, type ServerEvent, type PersistedRun } from '@journey/contracts';
+/** 身份上下文来自守卫，不信任请求自报用户。 */
+import type { Actor } from '../identity/auth.service.js';
+/** 数据库基础设施集中管理连接和迁移。 */
+import { StorageService } from '../../storage/storage.module.js';
+/** 运行SQL结果包含内部租约字段，序列化时必须白名单取值。 */
+export interface RunRow { id: string; request_id: string; user_id: string; session_id: string; conversation_id: string; status: PersistedRun['status']; created_at: Date; lease_until: Date; cancel_requested: boolean; event_count: number; output_bytes: number; }
+/** 显式挑选公开运行信息。 */
+export function publicRun(row: RunRow): PersistedRun { return persistedRunSchema.parse({ id: row.id, requestId: row.request_id, conversationId: row.conversation_id, status: row.status, createdAt: row.created_at.toISOString() }); }
+/** 行锁保证消息正文、事件序号与运行终态原子一致。 */
+@Injectable()
+/** SQL全部使用参数绑定，原文不写日志。 */
+export class RuntimeRepository {
+  /** 持有应用唯一存储服务。 */
+  constructor(private readonly storage: StorageService) {}
+  /** 固定事务包装器，任何错误都会回滚并释放连接。 */
+  async transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+    /** 从有上限的池获取连接，不创建额外连接池。 */
+    const client = await this.storage.sql.connect();
+    /** 事务退出时确保释放资源。 */
+    try { await client.query('BEGIN'); const value = await work(client); await client.query('COMMIT'); return value; }
+    /** 失败不留下半条消息或半个运行。 */
+    catch (error) { await client.query('ROLLBACK'); throw error; }
+    /** 所有路径回收连接。 */
+    finally { client.release(); }
+  /** 结束事务方法。 */
+  }
+  /** 归属检查不能被客户端提供的conversationId绕过。 */
+  async own(userId: string, conversationId: string): Promise<void> { const result = await this.storage.sql.query('SELECT id FROM conversations WHERE id=$1 AND user_id=$2', [conversationId, userId]); if (!result.rowCount) throw new NotFoundException('会话不存在'); }
+  /** 创建运行、两条消息和开始事件使用同一事务。 */
+  async start(actor: Actor, conversationId: string, input: { requestId: string; message: string }): Promise<{ run: PersistedRun; created: boolean }> {
+    /** 全局短事务锁使多进程并发配额和请求去重保持一致。 */
+    return this.transaction(async (client) => {
+      /** 所有启动按相同锁顺序执行，避免并发跨会话死锁。 */
+      await client.query('SELECT pg_advisory_xact_lock(77420903)');
+      /** 会话行锁阻止快照与创建消息交错。 */
+      const owned = await client.query('SELECT * FROM conversations WHERE id=$1 AND user_id=$2 FOR UPDATE', [conversationId, actor.userId]);
+      /** 不区分不存在与其他用户资源。 */
+      const conversation = owned.rows[0]; if (!conversation) throw new NotFoundException('会话不存在');
+      /** 相同用户请求ID只执行一次，重复提交不能改变原文或会话。 */
+      const previous = await client.query<RunRow>('SELECT * FROM runs WHERE user_id=$1 AND request_id=$2', [actor.userId, input.requestId]);
+      /** 校验幂等请求的原始内容，冲突明确返回409。 */
+      if (previous.rows[0]) { const old = previous.rows[0]; const question = await client.query('SELECT content FROM messages WHERE run_id=$1 AND role=\'user\'', [old.id]); if (old.conversation_id !== conversationId || question.rows[0]?.content !== input.message) throw new ConflictException('请求标识已用于其他消息'); return { run: publicRun(old), created: false }; }
+      /** 归档会话仍可读历史，但禁止启动新运行。 */
+      if (conversation.archived) throw new ConflictException('请先恢复归档会话');
+      /** 数据库配额覆盖所有进程；部分唯一索引提供第二层保护。 */
+      const counts = await client.query('SELECT count(*)::int AS total, count(*) FILTER (WHERE user_id=$1)::int AS own FROM runs WHERE status=\'running\'', [actor.userId]);
+      /** 每个用户最多一个活动任务，整体最多二十个。 */
+      if (counts.rows[0].own >= 1 || counts.rows[0].total >= 20) throw new HttpException('运行配额已满，请等待或停止当前任务', 429);
+      /** 租约超时后由恢复器写入明确失败终态。 */
+      const inserted = await client.query<RunRow>('INSERT INTO runs(id,request_id,user_id,session_id,conversation_id,lease_until) VALUES($1,$2,$3,$4,$5,now()+interval \'15 seconds\') RETURNING *', [randomUUID(), input.requestId, actor.userId, actor.sessionId, conversationId]);
+      /** 数据库保证INSERT返回一行。 */
+      const row = inserted.rows[0]!;
+      /** 先分配两个单调消息位置，正文稍后随事件更新。 */
+      await client.query('UPDATE conversations SET message_count=message_count+2,updated_at=now() WHERE id=$1', [conversationId]);
+      /** 同一运行最多一条用户输入和一条助手正文。 */
+      await client.query('INSERT INTO messages(id,run_id,conversation_id,role,content,position) VALUES($1,$2,$3,\'user\',$4,$5),($6,$2,$3,\'assistant\',\'\',$7)', [randomUUID(), row.id, conversationId, input.message, conversation.message_count + 1, randomUUID(), conversation.message_count + 2]);
+      /** 开始事件先提交，再启动实际工作，避免运行身份丢失。 */
+      await this.appendLocked(client, row, 'run.started', { mode: 'diagnostic', message: '持久化运行已开始；当前执行系统自检，模型编排属于第四模块。' });
+      /** 提交方得到固定运行ID，重试不会生成第二轮输入。 */
+      return { run: publicRun(row), created: true };
+    /** 结束启动事务。 */
+    });
+  /** 结束创建运行方法。 */
+  }
+  /** 调用方必须先锁定会话行再锁运行行，统一锁顺序。 */
+  private async appendLocked(client: PoolClient, run: RunRow, type: ServerEvent['type'], payload: unknown): Promise<boolean> {
+    /** 终态不可逆，迟到执行器不能覆盖取消或恢复失败。 */
+    if (run.status !== 'running') return false;
+    /** 判断本事件是否代表终态。 */
+    const terminal = type === 'run.completed' ? 'completed' : type === 'run.cancelled' ? 'cancelled' : type === 'run.failed' ? 'failed' : null;
+    /** 留出一个终态事件位置，并限制增量正文大小。 */
+    const content = type === 'message.delta' ? (payload as { content: string }).content : ''; const bytes = Buffer.byteLength(content);
+    /** 超额由外层执行器转为受控失败事件。 */
+    if (!terminal && (run.event_count >= 510 || run.output_bytes + bytes > 32768)) throw new BadRequestException('运行输出已达到上限');
+    /** 会话事件水位与JSON事件在同一事务更新。 */
+    const sequence = await client.query('UPDATE conversations SET event_sequence=event_sequence+1,updated_at=now() WHERE id=$1 RETURNING event_sequence', [run.conversation_id]);
+    /** 公开协议阻止内部租约或凭据混入事件。 */
+    const event = serverEventSchema.parse({ protocolVersion: 1, id: randomUUID(), runId: run.id, sequence: sequence.rows[0].event_sequence, timestamp: new Date().toISOString(), type, payload });
+    /** 单事件体积有硬上限，工具返回不能无限增长。 */
+    if (Buffer.byteLength(JSON.stringify(event)) > 16384) throw new BadRequestException('工具结果过大');
+    /** 事件主键避免同一会话出现重复序号。 */
+    await client.query('INSERT INTO run_events(conversation_id,sequence,run_id,event) VALUES($1,$2,$3,$4)', [run.conversation_id, event.sequence, run.id, event]);
+    /** 已经公开的正文与重放数据原子一致。 */
+    if (content) await client.query('UPDATE messages SET content=content||$1 WHERE run_id=$2 AND role=\'assistant\'', [content, run.id]);
+    /** 终态和结束时间一次写入，后续追加会被行锁后的状态检查拒绝。 */
+    await client.query('UPDATE runs SET event_count=event_count+1,output_bytes=output_bytes+$2,status=COALESCE($3,status),finished_at=CASE WHEN $3::text IS NULL THEN finished_at ELSE now() END WHERE id=$1', [run.id, bytes, terminal]);
+    /** 成功表明确实生成了持久化事件。 */
+    return true;
+  /** 结束原子追加。 */
+  }
+  /** 任意执行器追加前重新检查数据库终态。 */
+  async append(runId: string, type: ServerEvent['type'], payload: unknown, expiredOnly = false): Promise<boolean> {
+    /** 先读取不可变归属，然后以统一顺序锁定。 */
+    return this.transaction(async (client) => {
+      /** 运行删除时不产生新事件。 */
+      const found = await client.query<RunRow>('SELECT * FROM runs WHERE id=$1', [runId]); const initial = found.rows[0]; if (!initial) return false;
+      /** 会话锁使快照水位和正文保持一致。 */
+      await client.query('SELECT id FROM conversations WHERE id=$1 FOR UPDATE', [initial.conversation_id]);
+      /** 运行锁确保并发取消、成功与恢复只有一个终态。 */
+      const result = await client.query<RunRow>('SELECT * FROM runs WHERE id=$1 FOR UPDATE', [runId]); const run = result.rows[0]!;
+      /** 恢复器必须在锁内再次检查租约，防止误杀刚续租任务。 */
+      if (expiredOnly && run.lease_until.getTime() > Date.now()) return false;
+      /** 服务端已经收到取消后，不再发布新的增量或成功终态。 */
+      if (run.cancel_requested && type !== 'run.cancelled' && type !== 'run.failed') return false;
+      /** 统一实现状态机与事件一致性。 */
+      return this.appendLocked(client, run, type, payload);
+    /** 结束事件事务。 */
+    });
+  /** 结束追加方法。 */
+  }
+  /** 快照持有短会话锁，返回精确的重放起点。 */
+  async snapshot(userId: string, conversationId: string, before: string | undefined, limit: number) {
+    /** 查询和水位在同一事务内，不与事件追加交错。 */
+    return this.transaction(async (client) => {
+      /** 所有权始终带入数据库条件。 */
+      const owned = await client.query('SELECT event_sequence FROM conversations WHERE id=$1 AND user_id=$2 FOR UPDATE', [conversationId, userId]); if (!owned.rowCount) throw new NotFoundException('会话不存在');
+      /** 只接受当前会话的真实消息游标。 */
+      let position = 2147483647; if (before) { const cursor = await client.query('SELECT position FROM messages WHERE id=$1 AND conversation_id=$2', [before, conversationId]); if (!cursor.rowCount) throw new NotFoundException('消息游标不存在'); position = cursor.rows[0].position; }
+      /** 最新一页先倒序读取，再按自然对话顺序输出。 */
+      const page = await client.query('SELECT m.*,r.status FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.conversation_id=$1 AND m.position<$2 ORDER BY m.position DESC LIMIT $3', [conversationId, position, limit + 1]);
+      /** 最新运行的所有公开步骤用于恢复执行面板，单运行最多512个事件。 */
+      const latest = await client.query<RunRow>('SELECT * FROM runs WHERE conversation_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1', [conversationId]); const run = latest.rows[0];
+      /** 只取最新运行轨迹，历史正文通过消息分页加载。 */
+      const events = run ? await client.query('SELECT event FROM run_events WHERE run_id=$1 ORDER BY sequence LIMIT 512', [run.id]) : { rows: [] };
+      /** 去除内部字段并校验公开快照。 */
+      const items = page.rows.slice(0, limit).reverse().map((row) => ({ id: row.id, runId: row.run_id, role: row.role, content: row.content, position: row.position, createdAt: row.created_at.toISOString(), status: row.status }));
+      /** 水位不受分页游标影响，代表当前整个会话已提交事件。 */
+      return conversationSnapshotSchema.parse({ items, nextCursor: page.rows.length > limit ? items[0]?.id : null, run: run ? publicRun(run) : null, events: events.rows.map((row) => row.event), sequence: owned.rows[0].event_sequence });
+    /** 结束快照事务。 */
+    });
+  /** 结束快照读取。 */
+  }
+  /** 小批量重放使内存用量不随会话总长度增长。 */
+  async events(conversationId: string, after: number): Promise<ServerEvent[]> { const result = await this.storage.sql.query('SELECT event FROM run_events WHERE conversation_id=$1 AND sequence>$2 ORDER BY sequence LIMIT 64', [conversationId, after]); return result.rows.map((row) => serverEventSchema.parse(row.event)); }
+  /** 取消只允许归属匹配的用户，跨实例通过数据库标志传递。 */
+  async cancel(userId: string, conversationId: string, runId: string): Promise<void> { await this.own(userId, conversationId); const result = await this.storage.sql.query('UPDATE runs SET cancel_requested=true WHERE id=$1 AND conversation_id=$2 AND user_id=$3 RETURNING id', [runId, conversationId, userId]); if (!result.rowCount) throw new NotFoundException('运行不存在'); }
+  /** 续租同时检查登录会话是否撤销，登出后任务也停止。 */
+  async renew(runId: string): Promise<boolean> { const result = await this.storage.sql.query('UPDATE runs r SET lease_until=now()+interval \'15 seconds\' FROM refresh_sessions s,users u WHERE r.id=$1 AND r.status=\'running\' AND NOT r.cancel_requested AND s.id=r.session_id AND s.revoked_at IS NULL AND s.expires_at>now() AND u.id=r.user_id AND u.disabled_at IS NULL RETURNING r.id', [runId]); return Boolean(result.rowCount); }
+  /** 查找过期任务时限制批次，恢复器不会一次读取全部历史。 */
+  async expired(): Promise<string[]> { const result = await this.storage.sql.query('SELECT id FROM runs WHERE status=\'running\' AND lease_until<now() LIMIT 40'); return result.rows.map((row) => row.id as string); }
+/** 结束运行仓储。 */
+}

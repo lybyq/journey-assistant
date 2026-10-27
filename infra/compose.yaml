@@ -1,0 +1,47 @@
+# 这些服务供第二模块接入；第一模块不会启动或假装已连接它们。
+name: journey-local
+# 数据服务只绑定本机，禁止把本地演示凭据用于公网环境。
+services:
+  # PostgreSQL 保存长期用户、会话、方案版本与价格证据。
+  postgres:
+    # 使用明确主版本，避免镜像 latest 在重建时意外跨主版本。
+    image: postgres:17.6-alpine3.22
+    # 本地示例凭据仅用于隔离开发环境。
+    environment:
+      POSTGRES_USER: journey
+      POSTGRES_PASSWORD: journey_local
+      POSTGRES_DB: journey
+    # 限制为本机访问，降低开发数据库误暴露风险。
+    ports:
+      - '127.0.0.1:55433:5432'
+    # 使用命名卷跨容器重建保留数据。
+    volumes:
+      - journey_postgres:/var/lib/postgresql/data
+    # 第二模块可依此等待真实数据库就绪。
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U journey -d journey']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  # Redis 保存缓存、短期运行状态与限流信息。
+  redis:
+    # 固定 Redis 主版本，数据持久化策略由后续存储模块确认。
+    image: redis:8.2.1-alpine
+    # AOF 为本地开发提供可恢复缓存，但不替代 PostgreSQL 真相数据。
+    command: ['redis-server', '--appendonly', 'yes']
+    # 只允许本机客户端连接开发缓存。
+    ports:
+      - '127.0.0.1:56379:6379'
+    # Redis 的本地数据使用独立命名卷。
+    volumes:
+      - journey_redis:/data
+    # 真实响应 PONG 后才标记容器健康。
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+# 命名卷由 Docker 管理；不在自动脚本中删除用户数据卷。
+volumes:
+  journey_postgres:
+  journey_redis:

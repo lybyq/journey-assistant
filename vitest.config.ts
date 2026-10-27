@@ -1,0 +1,8 @@
+/** 导入测试配置函数，避免把测试运行配置混入应用构建。 */
+import { defineConfig } from 'vitest/config';
+/** 统一执行协议、服务和网页纯逻辑测试，组件测试将在对应业务模块补充。 */
+export default defineConfig({
+  /** 服务端测试需要 Node 的真实 HTTP 和 WebSocket 能力。 */
+  test: { environment: 'node', include: ['tests/**/*.test.ts'], testTimeout: 15000 },
+/** 结束测试配置声明。 */
+});

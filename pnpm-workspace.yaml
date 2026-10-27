@@ -1,0 +1,10 @@
+# 工作区同时管理后端、网页和跨端共享协议，避免三处维护重复类型。
+packages:
+  # 应用目录包含独立部署的 NestJS API 与 Vue 网页。
+  - apps/*
+  # 公共包目录存放不依赖浏览器和 NestJS 的协议。
+  - packages/*
+# 仅允许构建工具执行安装脚本，外部 MCP 不在安装时启动。
+onlyBuiltDependencies:
+  - '@nestjs/core'
+  - esbuild

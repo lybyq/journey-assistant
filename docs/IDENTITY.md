@@ -1,0 +1,119 @@
+# 第二模块：用户、存储与数据归属
+
+交付日期：2026-10-27（Asia/Shanghai）。本模块完成后停止，不提前实施第三模块的消息存储、生产运行和断线重放。
+
+## 已实现的用户流程
+
+1. 网页登录/注册窗口支持规范化邮箱与15～128字符长口令；密码只作为表单临时值，成功、失败或关闭后清空。
+2. 注册在同一数据库事务内创建用户、密码摘要、基础资料、首个登录会话、刷新令牌摘要和审计记录。
+3. 登录后编辑显示名、常用出发城市、出行方式与旅行节奏，保存到当前账户。
+4. 新建会话真实落库；选择会话重新验证资源归属；支持改名、游标分页、归档与账户页恢复。
+5. 刷新页面通过HttpOnly Cookie恢复登录，访问令牌只在内存保存，不写localStorage或sessionStorage。
+6. 支持退出当前登录和全部设备退出，服务器立即拒绝旧JWT，不等JWT自然到期。
+
+当前邮箱只是登录标识，尚未验证邮箱所有权；不显示“邮箱已验证”徽章。本轮未接入邮件供应商、密码找回和第三方身份服务。
+
+## 本地启动
+
+```powershell
+pnpm install
+pnpm storage:setup
+pnpm dev
+```
+
+本项目容器：`journey-local-postgres-1`、`journey-local-redis-1`；PostgreSQL主机端口55433，Redis端口56379，只绑定127.0.0.1。使用本项目独立命名卷，不修改本机已有5432、6379端口上其他项目的数据。
+
+`storage:setup` 在 `apps/api/.env.storage.local` 创建配置，包含随机生成的 AUTH_SECRET；文件存在则不覆盖。加载优先级：进程环境 → `.env.storage.local` → 原有 `.env` → 默认值。原有模型、高德与Tavily配置继续保留。
+
+不使用Docker时，可以自行设置 DATABASE_URL、REDIS_URL、AUTH_SECRET 与 STORAGE_ENABLED=true。AUTH_SECRET至少32字节；数据库和缓存必须真实可用。STORAGE_ENABLED=false只保留第一模块自检，身份接口不会退回到内存假数据。
+
+迁移在应用开始监听之前执行，也可独立运行 `pnpm db:migrate`。`pnpm storage:down` 仅停止本项目容器，不移除数据卷。
+
+## 数据结构
+
+| 表 | 职责与边界 |
+| --- | --- |
+| users | UUID、规范化唯一邮箱、公开显示名、创建和禁用时间 |
+| credentials | 只保存版本化scrypt摘要，与公开用户分表 |
+| refresh_sessions | 用户绑定的登录会话族、固定到期时间、撤销状态 |
+| refresh_tokens | 高熵刷新秘密的SHA256摘要、消费时间，保留历史以检测重放 |
+| traveler_profiles | 当前账户的城市、出行方式和旅行节奏 |
+| conversations | 必填所有者、标题、可恢复归档、稳定创建时间和更新时间 |
+| audit_events | 动作、资源ID和用户ID，不包含密码、Token或聊天正文 |
+| journey_migrations | 已执行迁移名、SHA256校验和、应用时间 |
+
+所有对外用户和会话响应使用白名单序列化。不存在任意 `/users/:id` 读取资料的开放接口。
+
+## 迁移与资源生命周期
+
+- Drizzle ORM提供类型安全的PostgreSQL查询；SQL迁移单独提交版本控制。
+- 连接池限制为10个连接，连接等待和SQL执行有超时。
+- PostgreSQL advisory lock防止多实例启动时重复应用迁移。
+- 每个SQL迁移及账本记录在同一事务提交；已执行迁移内容发生变化时拒绝继续启动。
+- 新结构通过新增编号迁移更新，禁止改写已执行SQL。
+- Redis客户端监听错误、限制连接重试、禁用故障离线队列；认证限流不能因Redis故障被悄悄绕过。
+- 应用退出释放自身连接；不停止其他项目容器，不删除用户数据。
+- `/system/health` 描述进程；`/system/storage` 执行真实数据库/缓存探针，不可用时返回503。
+
+## 认证设计
+
+密码采用异步scrypt（N=32768、r=8、p=3、独立32字节随机盐、64字节输出），固定参数版本化保存，使用timingSafeEqual比较。该参数组合属于[OWASP列出的scrypt配置](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。未知邮箱也执行一次真实派生，登录失败使用相同提示。
+
+JWT默认15分钟，明确校验HS256、签发方journey-api、受众journey-web、类型和过期时间，绑定用户ID与数据库会话ID。每次私有请求都校验数据库会话未撤销、未过期、用户未禁用，因此退出立即生效。
+
+刷新会话默认固定30天，不因持续刷新无限延长。刷新秘密由32字节安全随机数生成，只存在HttpOnly Cookie与服务端内存；数据库仅保存SHA256摘要。
+
+刷新在会话行锁下原子消费旧秘密并插入新摘要。历史已消费令牌被重放时，撤销整个会话族，提交事务后才返回401，避免抛异常将撤销回滚。猜错秘密不会仅凭sessionId撤销他人会话。设计参考[OAuth安全最佳实践的刷新轮换与重放检测](https://datatracker.ietf.org/doc/html/rfc9700#section-4.14)。
+
+Cookie固定属性：HttpOnly、SameSite=Strict、Path=/api/v1/auth；生产Secure。访问令牌不放Cookie或URL。所有认证变更要求 `x-journey-client: web`；浏览器Origin必须属于精确白名单；跨站表单无法带此自定义头，跨站脚本受预检限制。非浏览器客户端同样需要显式请求头。
+
+认证端点使用Redis Lua原子自增与过期实现窗口限流；Redis键里的IP使用SHA256摘要。当前注册10次/10分钟，登录30次/10分钟，其余认证变更90次/10分钟。代理部署必须明确设计可信代理层和真实IP策略，不能无条件信任客户端X-Forwarded-For。
+
+## 前端身份状态
+
+- 网络层持有内存短期令牌，Pinia只消费公开用户数据。
+- 同标签页合并刷新请求；支持Web Locks的浏览器协调同源多标签页刷新，避免并发消费同一个Cookie。
+- 只对明确401刷新并重试一次；403、404不重试；服务故障不会伪装成登录失效。
+- 身份代数拒绝退出/切换账户前发出的迟到刷新响应。
+- 资料和会话请求带本地身份代数，迟到结果不能写回另一个账户。
+- 账户切换和退出清空本地旧资料、会话列表及临时诊断聊天。
+- 网页为同站部署设计；跨站Cookie策略、第三方Cookie兼容、小程序登录属于单独适配工作。
+
+## 接口
+
+所有路径前缀为 `/api/v1`。私有接口使用 `Authorization: Bearer <短期JWT>`；认证POST另需 `x-journey-client: web`。
+
+| 方法 | 路径 | 行为 |
+| --- | --- | --- |
+| POST | /auth/register | 注册并建立首个登录会话 |
+| POST | /auth/login | 验证密码并建立独立登录会话 |
+| POST | /auth/refresh | 从HttpOnly Cookie轮换刷新秘密 |
+| POST | /auth/logout | 幂等撤销当前Cookie所属会话 |
+| POST | /auth/logout-all | 以可信actor撤销当前用户全部会话 |
+| GET/PATCH | /me | 查询/更新当前用户公开显示名 |
+| GET/PATCH | /me/profile | 查询/更新当前用户基础旅行偏好 |
+| GET/POST | /conversations | 当前用户游标分页/新建会话 |
+| GET/PATCH | /conversations/:id | 当前用户会话读取、改名、归档/恢复 |
+| GET | /system/storage | 真实数据服务就绪探针 |
+
+当前Nest POST成功响应使用201，其余成功查询/更新使用200。会话列表参数：limit默认20、最大50；cursor必须是当前用户及当前归档筛选下的会话ID；archived严格接受true/false文本。
+
+用户A读取、修改、归档或用用户B的会话作为分页游标，统一返回404。资源UUID不是访问权限。客户端请求体中的userId等额外字段被schema.strict拒绝。
+
+Swagger已注册Bearer认证和认证请求头说明，注册/登录字段提供OpenAPI请求结构；不放置真实密钥或演示访问令牌。
+
+## 本轮范围与后续衔接
+
+本轮保存的是会话元数据；聊天消息、运行表、事件日志、WebSocket业务鉴权和断线补发属于第三模块。当前诊断网关仍是本机开发system.health工具，不引用任何用户私有资源，也不提供跨连接取消能力。
+
+本轮不调用模型、MCP、支付或旅游预订接口。数据备份、周期性过期令牌清理、邮件认证、多因素认证和生产观测等需在明确对应模块/扩展任务时继续实现，不以当前本地验收冒充完整生产发布。
+
+## 验收
+
+`pnpm check` 已通过：共享协议、Nest、Vue模板和测试代码类型检查，6个测试文件共39项测试，以及全部生产构建。网页主JS约348KB（gzip约119KB），CSS约29KB（gzip约7KB）。
+
+新增真实验收包括：双账户注册、规范化邮箱唯一性、秘密不落明文、匿名拒绝、CSRF拒绝、资料隔离、资源归属、会话归档恢复、服务重启持久化、迁移幂等、刷新轮换、重放后撤销、猜错秘密不影响其他会话、JWT用途和过期校验、当前/全部设备退出、Redis实际限流。
+
+测试使用随机命名的独立数据库和Redis前缀，只清理该测试数据库及前缀，不操作开发用户数据。浏览器验收使用保留测试域名的独立账户，不输入任何真实用户凭据。
+
+浏览器已实际验证：登录、资料保存、会话创建/改名、页面刷新恢复、归档列表读取、恢复回活动列表、保存的自驾偏好同步输入区，以及退出后清空当前用户界面。验收截图位于本地`.local/module2-account-preview.png`，只包含虚构验收账户信息。

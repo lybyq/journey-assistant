@@ -1,0 +1,8 @@
+# 文本统一LF；迁移按原始字节保存，避免改变已执行文件的校验和。
+* text=auto eol=lf
+*.sql -text
+# 图片按二进制存储，不执行换行转换。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary

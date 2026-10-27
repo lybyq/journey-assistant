@@ -1,0 +1,25 @@
+# 忽略各工作区安装的第三方依赖。
+node_modules/
+# 忽略编译产物和测试覆盖率文件。
+dist/
+coverage/
+*.tsbuildinfo
+# 忽略真实密钥，仅提交带说明的环境变量模板。
+.env
+.env.local
+.env.*.local
+# 任何真实环境变体都不得上传，只允许示例模板。
+.env.*
+!.env.example
+# 本地私钥、证书秘密与数据库备份不进入版本控制。
+*.pem
+*.key
+*.p12
+*.pfx
+*.dump
+*.sql.gz
+# 忽略本地日志、截图和浏览器测试输出。
+*.log
+.local/
+test-results/
+playwright-report/

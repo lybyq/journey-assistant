@@ -37,7 +37,7 @@ async function startServer(): Promise<void> {
   /** 测试不暴露公网，也不调用模型或MCP。 */
   const script = `import { createApplication } from ${JSON.stringify(bootstrap)}; const app=await createApplication({logger:false}); await app.listen(0,'127.0.0.1'); console.log('IDENTITY_TEST:'+await app.getUrl());`;
   /** 显式设置存储配置，覆盖开发环境文件但不修改文件。 */
-  server = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, NODE_ENV: 'test', STORAGE_ENABLED: 'true', DATABASE_URL: testUrl.href, REDIS_URL: redisUrl, REDIS_PREFIX: prefix, AUTH_SECRET: secret, ENABLE_DIAGNOSTICS: 'false', CORS_ORIGINS: 'http://localhost:5173' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  server = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, NODE_ENV: 'test', CHAT_EXECUTOR: 'diagnostic', MCP_SERVERS: '', STORAGE_ENABLED: 'true', DATABASE_URL: testUrl.href, REDIS_URL: redisUrl, REDIS_PREFIX: prefix, AUTH_SECRET: secret, ENABLE_DIAGNOSTICS: 'false', CORS_ORIGINS: 'http://localhost:5173' }, stdio: ['ignore', 'pipe', 'pipe'] });
   /** 只有实际监听后才允许发送测试请求。 */
   base = await new Promise<string>((resolve, reject) => { let output = ''; let errors = ''; const timer = setTimeout(() => reject(new Error('身份测试服务启动超时')), 15000); server.stderr?.on('data', (chunk) => { errors += String(chunk); }); server.stdout?.on('data', (chunk) => { output += String(chunk); const match = /IDENTITY_TEST:(http:\/\/[^\s]+)/.exec(output); if (match?.[1]) { clearTimeout(timer); resolve(match[1]); } }); server.once('exit', (code) => { clearTimeout(timer); reject(new Error(`身份测试服务退出：${code} ${errors}`)); }); server.once('error', (error) => { clearTimeout(timer); reject(error); }); });
 /** 结束真实服务启动。 */
@@ -65,7 +65,7 @@ afterAll(async () => {
 /** 按真实用户流程验证身份、持久化与数据隔离。 */
 describe('第二模块真实数据验收', () => {
   /** 就绪状态必须来自真实数据库和Redis探针。 */
-  it('数据服务真实就绪并完成一次迁移', async () => { const response = await request('/system/storage'); expect(await response.json()).toEqual({ enabled: true, postgres: 'ready', redis: 'ready' }); const rows = await db.query('SELECT name FROM journey_migrations'); expect(rows.rows).toHaveLength(2); });
+  it('数据服务真实就绪并完成一次迁移', async () => { const response = await request('/system/storage'); expect(await response.json()).toEqual({ enabled: true, postgres: 'ready', redis: 'ready' }); const rows = await db.query('SELECT name FROM journey_migrations'); expect(rows.rows).toHaveLength(3); });
   /** 没有认证时不能访问任何用户私有数据。 */
   it('匿名请求不能读取账户或会话', async () => { expect((await request('/me')).status).toBe(401); expect((await request('/conversations')).status).toBe(401); });
   /** CSRF边界在执行密码派生和业务写入前拒绝请求。 */
@@ -91,7 +91,7 @@ describe('第二模块真实数据验收', () => {
   /** 归档可恢复，不破坏会话数据。 */
   it('支持会话改名、归档与恢复', async () => { expect((await request(`/conversations/${conversationId}`, { method: 'PATCH', token: alice.accessToken, body: { title: '已改名旅行', archived: true } })).status).toBe(200); const active = await (await request('/conversations', { token: alice.accessToken })).json(); const archived = await (await request('/conversations?archived=true', { token: alice.accessToken })).json(); expect(active.items).toEqual([]); expect(archived.items[0].title).toBe('已改名旅行'); await request(`/conversations/${conversationId}`, { method: 'PATCH', token: alice.accessToken, body: { archived: false } }); });
   /** 重启服务器验证实际持久化，并再次执行迁移检测幂等性。 */
-  it('服务重启后账户、资料、会话与登录仍有效', async () => { await stopServer(); await startServer(); expect((await request('/me', { token: alice.accessToken })).status).toBe(200); expect((await (await request('/me/profile', { token: alice.accessToken })).json()).homeCity).toBe('杭州'); expect((await (await request(`/conversations/${conversationId}`, { token: alice.accessToken })).json()).title).toBe('已改名旅行'); expect((await db.query('SELECT name FROM journey_migrations')).rows).toHaveLength(2); }, 20000);
+  it('服务重启后账户、资料、会话与登录仍有效', async () => { await stopServer(); await startServer(); expect((await request('/me', { token: alice.accessToken })).status).toBe(200); expect((await (await request('/me/profile', { token: alice.accessToken })).json()).homeCity).toBe('杭州'); expect((await (await request(`/conversations/${conversationId}`, { token: alice.accessToken })).json()).title).toBe('已改名旅行'); expect((await db.query('SELECT name FROM journey_migrations')).rows).toHaveLength(3); }, 20000);
   /** 每次刷新改变Cookie；旧秘密重放后新旧访问JWT都必须失效。 */
   it('刷新轮换并检测重放，撤销事务不会回滚', async () => { const oldCookie = aliceCookie; const response = await request('/auth/refresh', { method: 'POST', cookie: oldCookie }); expect(response.status).toBe(201); const renewed = authResponseSchema.parse(await response.json()); aliceCookie = cookie(response); expect(aliceCookie).not.toBe(oldCookie); expect((await request('/me', { token: renewed.accessToken })).status).toBe(200); expect((await request('/auth/refresh', { method: 'POST', cookie: oldCookie })).status).toBe(401); expect((await request('/me', { token: renewed.accessToken })).status).toBe(401); expect((await request('/auth/refresh', { method: 'POST', cookie: aliceCookie })).status).toBe(401); expect((await db.query("SELECT id FROM audit_events WHERE action='session.replay_rejected'")).rows).toHaveLength(1); });
   /** 登出服务端会话后，即使JWT未过期也不能继续访问。 */

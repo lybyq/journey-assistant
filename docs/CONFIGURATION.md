@@ -90,3 +90,11 @@ API dependencies 包含 Nest 运行包、Deep Agents、LangChain、LangGraph、O
 Web dependencies 包含 Vue、Router、Pinia、marked、DOMPurify、按语言导入的 highlight.js、图标库与共享协议。Vite 配置限定端口避免来源白名单偏移；开发和预览均代理 API 与 WebSocket。
 
 共享包 exports 将运行时代码与类型声明指向 dist；必须先编译共享包。共享包中不出现服务器文件系统、模型秘密值或浏览器专用 API。
+
+## 模块04/05环境与学习约定
+
+`CHAT_EXECUTOR=agent`默认真实问答；缺模型配置明确失败。仅本机测试可用diagnostic，生产拒绝。AGENT_TIMEOUT_MS默认120000，AGENT_MAX_MODEL_CALLS默认12，AGENT_MAX_TOOL_CALLS默认20，AGENT_MAX_TOKENS默认50000；主子代理共同计数，缺usage时明确标注估算。
+
+MCP_SERVERS默认train,amap,tavily，空值关闭全部；MCP_CONNECT_TIMEOUT_MS默认15000，MCP_TOOL_TIMEOUT_MS默认20000，MCP_CIRCUIT_MS默认30000。12306使用锁定npm依赖0.3.10，直接Node启动，不临时npx安装。所有Key只放后端，示例模板保持空值。
+
+新增源码以【模块04】与【模块05】标注职责，分别阅读MODULE-04-AGENT.md和MODULE-05-MCP.md。

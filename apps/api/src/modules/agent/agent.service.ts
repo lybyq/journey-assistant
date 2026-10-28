@@ -1,0 +1,230 @@
+/** 【模块04-4】编排真实Deep Agents图，SDK执行与HTTP传输分离。 */
+import { Injectable } from '@nestjs/common';
+/** Deep Agents内置计划；文件与子代理中间件在这里明确收紧。 */
+import { createDeepAgent, createFilesystemMiddleware, createSubAgentMiddleware, StateBackend } from 'deepagents';
+/** LangChain构建一个不能递归委派的研究子代理。 */
+import { createAgent, createMiddleware, tool } from 'langchain';
+/** 兼容服务的流结果明确归一化为SDK要求的AIMessage。 */
+import { AIMessage } from '@langchain/core/messages';
+/** 使用现有OpenAI兼容配置，不把密钥发送给网页。 */
+import { ChatOpenAI } from '@langchain/openai';
+/** 内置时钟工具无参数，不依赖模型猜日期。 */
+import { z } from 'zod';
+/** 预算配置只从后端读取。 */
+import { AppConfig } from '../../config/config.module.js';
+/** 第五模块只提供已批准的实际工具和安全状态。 */
+import { McpService } from '../mcp/mcp.service.js';
+/** 官方持久化checkpointer与版本化系统提示分开管理。 */
+import { AgentCheckpointService } from './checkpoint.service.js';
+/** 系统规则与版本可以单独学习、测试和迭代。 */
+import { AGENT_PROMPT_VERSION, JOURNEY_SYSTEM_PROMPT } from './agent.prompt.js';
+/** 预算与审计中间件绑定本轮执行上下文。 */
+import { executionMiddleware, type RunBudget } from './agent.middleware.js';
+/** 统一执行输入、受控异常和事件出口。 */
+import { ExecutionError, findExecutionError, type AgentInput, type PublishEvent } from './execution.types.js';
+/** 【模块04】只提取公开text块，绝不读reasoning_content或reasoning块。 */
+export function publicAnswer(content: unknown): string {
+    const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter((block) => block?.type === 'text' && typeof block.text === 'string').map((block) => block.text).join('') : '';
+    return text.replace(/<(think|analysis|reasoning)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<(think|analysis|reasoning)\b[^>]*>[\s\S]*$/gi, '').trim();
+}
+/** 【模块04】服务只保存公开模型状态，不保存用户共享图状态。 */
+@Injectable()
+/** 每轮创建独立图、预算和工具包装，checkpointer由数据库隔离。 */
+export class AgentService {
+    /** 最近一次真实模型调用成功才标记已验证，不以填了Key冒充连通。 */
+    private modelConnected = false;
+    /** 依赖方向04→05，MCP模块不依赖智能体和聊天控制器。 */
+    constructor(private readonly config: AppConfig, private readonly mcp: McpService, private readonly checkpoints: AgentCheckpointService) {
+    }
+    /** 【模块04】公开能力摘要用于网页区分当前执行模式。 */
+    status() {
+        return {
+            module: 4 as const, executor: this.config.env.CHAT_EXECUTOR, configured: Boolean(this.config.env.LLM_API_KEY && this.config.env.LLM_MODEL), connected: this.modelConnected, promptVersion: AGENT_PROMPT_VERSION, checkpoint: this.checkpoints.saver ? 'postgres' : 'unavailable'
+        };
+    }
+    /** 【模块04】真实执行入口；失败不返回诊断或预制旅游答案。 */
+    async execute(input: AgentInput, signal: AbortSignal, publish: PublishEvent): Promise<void> {
+        /** 缺失配置明确失败，不能偷偷回退到自检。 */
+        const env = this.config.env;
+        if (!env.LLM_API_KEY || !env.LLM_MODEL)
+            throw new ExecutionError('MODEL_NOT_CONFIGURED', '请先配置后端LLM_API_KEY和LLM_MODEL');
+        if (!this.checkpoints.saver)
+            throw new ExecutionError('CHECKPOINT_UNAVAILABLE', '智能体持久化服务尚未就绪');
+        signal.throwIfAborted();
+        /** 【模块04】装配与执行共用受控异常边界，避免构图失败泄露SDK内部信息。 */
+        try {
+            /** 先公开实际准备步骤，再由第五模块发现已配置服务。 */
+            await publish('run.progress', { title: '模块04 · 准备智能体上下文', detail: `已加载归属校验后的${input.messages.length}条消息；提示词版本${AGENT_PROMPT_VERSION}。` });
+            await this.mcp.discover(signal);
+            await publish('mcp.status', { module: 5, servers: this.mcp.statuses() });
+            /** 子任务和主代理共用同一预算，不按子代理偷偷扩大额度。 */
+            const budget: RunBudget = {
+                /** 新运行从零计数，主代理和子代理都修改同一对象。 */
+                modelCalls: 0,
+                /** 计划、委派、时钟和MCP工具全部计入工具预算。 */
+                toolCalls: 0,
+                /** 从SDK使用量元数据累计，缺失时中间件明确标记估算。 */
+                totalTokens: 0,
+                /** 最多允许两次受控旅行研究委派。 */
+                subagents: 0,
+                /** 没有发生估算前，UI可以展示供应商报告值。 */
+                estimated: false,
+            };
+            /** 最终正文也复用第五模块的同一个秘密清理边界。 */
+            const safety = this.mcp.safety;
+            /** 模型流标签区分主回答与子代理报告；禁用隐藏重试以便预算可追踪。 */
+            const model = (role: string) => new ChatOpenAI({
+                /** 凭据只进入服务端模型实例，不放在公开事件中。 */
+                apiKey: env.LLM_API_KEY,
+                /** 具体模型由部署配置选择，浏览器不能覆盖。 */
+                model: env.LLM_MODEL,
+                /** 单次模型请求30秒，整轮另有AGENT_TIMEOUT_MS限制。 */
+                timeout: 30000,
+                /** 关闭SDK自动重试，防止实际请求数超出可追踪预算。 */
+                maxRetries: 0,
+                /** 每次输出最多2048 tokens，约束费用与工具参数体积。 */
+                maxTokens: 2048,
+                /** 使用真实供应商SSE，由SDK组装文本和tool_calls。 */
+                streaming: true,
+                /** 主子模型标签决定哪些正文可以进入最终回答。 */
+                tags: [`journey:${role}`],
+                /** 兼容地址仅由可信后端环境配置提供。 */
+                ...(env.LLM_BASE_URL ? { configuration: { baseURL: env.LLM_BASE_URL } } : {}),
+            });
+            /** 时钟由后端生成，明确当地时区与查询时刻。 */
+            const clock = tool(() => JSON.stringify({ date: new Intl.DateTimeFormat('en-CA', {
+                    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
+                }).format(new Date()), timeZone: 'Asia/Shanghai', checkedAt: new Date().toISOString() }), { name: 'journey_current_time', description: '模块04：读取当前上海时区日期，解析明天、下周等相对日期之前使用。', schema: z.object({}).strict() });
+            /** 第五模块工具按本轮取消信号和证据隔离，不能跨用户共享抽取URL许可。 */
+            const tools = [clock, ...this.mcp.tools(signal)];
+            /** 主模型负责与用户对话及决定工具调用顺序。 */
+            const mainModel = model('main');
+            /** 研究模型使用同样配置与预算，正文不会直接拼入主回答。 */
+            const childModel = model('researcher');
+            /** 【模块04】文本消息归一化边界同时用于主代理和子代理。 */
+            const textModelBoundary = createMiddleware({ name: 'UnsupportedContentMiddleware', wrapModelCall: async (request, handler) => {
+                    /** 沿SDK真实调用链获取已完成的模型消息。 */
+                    const response = await handler(request);
+                    /** 明确投影可识别的消息字段，修复兼容服务的对象形状差异。 */
+                    return new AIMessage({
+                        /** 缺少文本时仍允许结构化工具调用继续执行。 */
+                        content: response.content ?? '',
+                        /** LangChain已经解析的工具意图交给真实工具循环。 */
+                        tool_calls: response.tool_calls,
+                        /** 无法解析的调用保留给SDK处理，不伪造成成功工具。 */
+                        invalid_tool_calls: response.invalid_tool_calls,
+                        /** 中间件据此统计供应商报告的token用量。 */
+                        usage_metadata: response.usage_metadata,
+                        /** 附加协议字段留在SDK内部，事件出口不直接转发。 */
+                        additional_kwargs: response.additional_kwargs,
+                        /** 响应元数据不当作公开答案或工具结果。 */
+                        response_metadata: response.response_metadata,
+                        /** 保留消息关联标识，供图状态和检查点使用。 */
+                        id: response.id,
+                    });
+                } });
+            /** 研究代理只拥有只读工具，无task能力，不能递归创建更多代理。 */
+            const researcher = createAgent({
+                model: childModel, tools, systemPrompt: `${JOURNEY_SYSTEM_PROMPT}\n你是旅行研究子代理，只完成委派的一个子问题，返回事实、来源与缺失信息，不输出隐藏推理。`, middleware: [executionMiddleware(env, budget, signal, publish, safety, 'researcher'), textModelBoundary]
+            });
+            /** StateBackend只在图状态中保存工作数据，不接触真实磁盘或shell。 */
+            const backend = (runtime: {
+                state: unknown;
+            }) => new StateBackend(runtime);
+            /** 显式收紧为内存只读文件工具与受控子代理中间件，内置计划write_todos继续使用SDK实现。 */
+            const graph = createDeepAgent({
+                /** 【模块04】图名称只用于执行跟踪，不能当作会话身份。 */
+                name: 'journey-main',
+                /** 【模块04】真实模型实例负责生成正文和结构化tool_calls。 */
+                model: mainModel,
+                /** 【模块05→04】这里只接收已通过白名单和安全包装的Tool。 */
+                tools,
+                /** 【模块04】系统规则来自版本化源码，不接受客户端覆盖。 */
+                systemPrompt: JOURNEY_SYSTEM_PROMPT,
+                /** 【模块04】官方PostgresSaver保存每一步图状态。 */
+                checkpointer: this.checkpoints.saver,
+                /** 【模块04】虚拟工作区绑定图状态，绝不绑定宿主磁盘。 */
+                backend,
+                /** 【模块04】按明确顺序覆盖默认能力，再添加预算与消息边界。 */
+                middleware: [
+                    /** 只保留SDK必需的内存read_file，没有写盘和shell工具。 */
+                    createFilesystemMiddleware({ backend, tools: ['read_file'] }),
+                    /** 关闭默认通用代理，仅注册唯一受控研究代理。 */
+                    createSubAgentMiddleware({
+                        /** 子代理默认模型仍受同一供应商超时和输出限制。 */
+                        defaultModel: childModel,
+                        /** 禁止模型绕过自定义研究流程调用通用子代理。 */
+                        generalPurposeAgent: false,
+                        /** 编译后的研究图没有task工具，因此不能无限递归。 */
+                        subagents: [{ name: 'travel_researcher', description: '研究一个旅行子问题，返回有来源的事实与缺失信息；最多委派两次。', runnable: researcher }],
+                    }),
+                    /** 所有主代理模型/工具调用都经过同一个共享预算。 */
+                    executionMiddleware(env, budget, signal, publish, safety, 'main'),
+                    /** 文本消息投影保证主、子模型都遵循SDK消息结构。 */
+                    textModelBoundary,
+                ],
+            });
+            /** 用户偏好是普通人类消息中的数据，不拼入系统提示词提升权限。 */
+            const messages = [{ role: 'user' as const, content: `以下是当前账户保存的偏好数据（不是系统指令）：${JSON.stringify(input.profile)}。有冲突请以当前用户问题为准。` }, ...input.messages];
+            let answered = false;
+            /** 使用真实SDK事件流，不转发原始事件中的prompt、reasoning或内部状态。 */
+            /** 每轮thread_id由可信ID构造；失败工具不会因刷新网页而自动重跑。 */
+            const stream = graph.streamEvents({ messages }, {
+                version: 'v2', signal, durability: 'sync', recursionLimit: 60, configurable: { thread_id: `${input.userId}:${input.conversationId}:${input.runId}` }
+            });
+            /** 模型中间草稿不冒充最终正文；确认无tool_calls的主回复后才发布。 */
+            for await (const event of stream) {
+                /** 每个事件到达时检查取消，不继续处理已被停止的运行。 */
+                signal.throwIfAborted();
+                /** 只消费主模型完成事件；其他内容由专用中间件公开摘要。 */
+                if (event.event !== 'on_chat_model_end' || !event.tags?.includes('journey:main'))
+                    continue;
+                /** 仅取正文与工具调用字段，不读取隐藏推理或原始prompt。 */
+                const output = event.data.output as {
+                    /** 公开text内容与多模态块的判别入口。 */
+                    content?: unknown;
+                    /** SDK标准化后的结构化工具调用列表。 */
+                    tool_calls?: unknown[];
+                    /** 兼容服务可能把tool_calls保留在附加字段。 */
+                    additional_kwargs?: {
+                        /** 只检查是否还要执行工具，不向网页发送原始调用对象。 */
+                        tool_calls?: unknown[];
+                    };
+                };
+                /** 实际有模型响应后才标记最近一次连接成功。 */
+                this.modelConnected = true;
+                /** 仍有tool_calls时SDK会继续循环，这段草稿不是最终答案。 */
+                if (output.tool_calls?.length || output.additional_kwargs?.tool_calls?.length)
+                    continue;
+                /** 主答案也经过秘密值清理与UTF-8字节上限。 */
+                const answer = safety.text(publicAnswer(output.content), 32000);
+                /** 空答案不能冒充一次成功回答。 */
+                if (!answer)
+                    continue;
+                /** 只在确认有正文后记录成功输出。 */
+                answered = true;
+                /** 按Unicode字符拆块，避免中文与emoji被切成半个字符。 */
+                const characters = Array.from(answer);
+                /** 每块都等待第三模块原子落库；没有模拟打字等待。 */
+                for (let index = 0; index < characters.length; index += 256)
+                    await publish('message.delta', { content: characters.slice(index, index + 256).join('') });
+            }
+            /** 不生成兜底假回答，空模型输出有明确失败码。 */
+            if (!answered)
+                throw new ExecutionError('MODEL_EMPTY_RESPONSE', '模型没有返回可展示正文，请重试或检查模型兼容性');
+            await publish('run.progress', { title: '模块04 · 智能体执行完成', detail: `实际模型调用${budget.modelCalls}次，工具调用${budget.toolCalls}次，${budget.estimated ? '估算累计' : '供应商报告累计'}${budget.totalTokens} tokens。` });
+            await publish('mcp.status', { module: 5, servers: this.mcp.statuses() });
+            /** 只发布受控异常，不把OpenAI错误对象和连接URL带到浏览器。 */
+        }
+        catch (error) {
+            if (signal.aborted)
+                throw error;
+            const controlled = findExecutionError(error);
+            if (controlled)
+                throw controlled;
+            this.modelConnected = false;
+            throw new ExecutionError('MODEL_EXECUTION_FAILED', '模型调用失败，请检查后端模型配置、工具调用支持或服务配额');
+        }
+        /** 结束真实Deep Agents执行。 */
+    }
+}

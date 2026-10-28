@@ -4,6 +4,10 @@ import { z } from "zod";
 export * from "./identity.js";
 /** 导出第三模块持久化协议；事件引用延迟解析避免模块循环初始化。 */
 export * from "./conversation-runtime.js";
+/** 【模块04/05】导出计划与外部工具的公共结构。 */
+export * from './agent-tools.js';
+/** 所有新增事件使用有界schema。 */
+import { safeToolResultSchema, publicTodoSchema, mcpStatusSchema } from './agent-tools.js';
 /** 健康响应复用第二模块无敏感信息的存储状态校验器。 */
 import { storageStatusSchema } from "./identity.js";
 /** 导出协议版本号；将来跨端升级时显式协商，避免静默解析错误。 */
@@ -67,7 +71,7 @@ export const moduleCatalog = [
     phase: 4,
     title: "智能体编排",
     description: "Deep Agents、LangChain、记忆与任务协同",
-    status: "planned",
+    status: "ready",
   },
   /** 第五模块管理外部 MCP 生命周期和调用边界。 */
   {
@@ -75,7 +79,7 @@ export const moduleCatalog = [
     phase: 5,
     title: "MCP 工具中心",
     description: "12306、高德、Tavily、超时、过滤与脱敏",
-    status: "planned",
+    status: "ready",
   },
   /** 第六模块将自由输入转成可验证的旅行约束。 */
   {
@@ -174,6 +178,14 @@ const eventBase = z.object({
 });
 /** 定义严格区分的事件联合；公开执行进度，不透传模型隐藏推理。 */
 export const serverEventSchema = z.discriminatedUnion("type", [
+  /** 【模块04】实际模型/子任务阶段和累计使用量。 */
+  eventBase.extend({ type: z.literal('agent.step'), payload: z.object({ module: z.literal(4), stage: z.enum(['model.started','model.completed','subagent.started','subagent.completed']), name: z.string().max(100), modelCalls: z.number().int().nonnegative(), toolCalls: z.number().int().nonnegative(), totalTokens: z.number().int().nonnegative(), estimated: z.boolean().default(false) }) }),
+  /** 【模块04】实际计划与隐藏思维链明确分离。 */
+  eventBase.extend({ type: z.literal('run.plan'), payload: z.object({ module: z.literal(4), todos: z.array(publicTodoSchema).max(12) }) }),
+  /** 【模块05】连接状态保存在公开运行轨迹中。 */
+  eventBase.extend({ type: z.literal('mcp.status'), payload: z.object({ module: z.literal(5), servers: z.array(mcpStatusSchema).max(3) }) }),
+  /** 【模块04/05】单个工具失败允许智能体解释或降级。 */
+  eventBase.extend({ type: z.literal('tool.failed'), payload: z.object({ callId: z.string().uuid(), name: z.string().max(100), code: z.string().max(60), message: z.string().max(300), durationMs: z.number().nonnegative() }) }),
   /** 连接建立事件用于确认协议和当前运行范围。 */
   eventBase.extend({
     type: z.literal("session.ready"),
@@ -182,7 +194,7 @@ export const serverEventSchema = z.discriminatedUnion("type", [
   /** 开始事件声明本次是诊断流程，避免误认为真实旅游规划。 */
   eventBase.extend({
     type: z.literal("run.started"),
-    payload: z.object({ mode: z.literal("diagnostic"), message: z.string() }),
+    payload: z.object({ mode: z.enum(['diagnostic','agent']), message: z.string() }),
   }),
   /** 进度事件只描述已经发生或即将执行的可公开步骤。 */
   eventBase.extend({
@@ -204,7 +216,7 @@ export const serverEventSchema = z.discriminatedUnion("type", [
     payload: z.object({
       callId: z.string().uuid(),
       name: z.string(),
-      output: healthSchema,
+      output: z.union([healthSchema, safeToolResultSchema]),
       durationMs: z.number().nonnegative(),
     }),
   }),

@@ -10,6 +10,12 @@ import { serverEventSchema, persistedRunSchema, conversationSnapshotSchema, type
 import type { Actor } from '../identity/auth.service.js';
 /** 数据库基础设施集中管理连接和迁移。 */
 import { StorageService } from '../../storage/storage.module.js';
+/** 【模块04】执行器模式来自后端配置，不能由请求体指定。 */
+import { AppConfig } from '../../config/config.module.js';
+/** 【模块04】上下文类型与提示词版本由智能体模块声明。 */
+import type { AgentInput } from '../agent/execution.types.js';
+/** 记录版本用于追踪同一条运行使用的规则。 */
+import { AGENT_PROMPT_VERSION } from '../agent/agent.prompt.js';
 /** 运行SQL结果包含内部租约字段，序列化时必须白名单取值。 */
 export interface RunRow { id: string; request_id: string; user_id: string; session_id: string; conversation_id: string; status: PersistedRun['status']; created_at: Date; lease_until: Date; cancel_requested: boolean; event_count: number; output_bytes: number; }
 /** 显式挑选公开运行信息。 */
@@ -19,7 +25,7 @@ export function publicRun(row: RunRow): PersistedRun { return persistedRunSchema
 /** SQL全部使用参数绑定，原文不写日志。 */
 export class RuntimeRepository {
   /** 持有应用唯一存储服务。 */
-  constructor(private readonly storage: StorageService) {}
+  constructor(private readonly storage: StorageService, private readonly config: AppConfig) {}
   /** 固定事务包装器，任何错误都会回滚并释放连接。 */
   async transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
     /** 从有上限的池获取连接，不创建额外连接池。 */
@@ -58,12 +64,14 @@ export class RuntimeRepository {
       const inserted = await client.query<RunRow>('INSERT INTO runs(id,request_id,user_id,session_id,conversation_id,lease_until) VALUES($1,$2,$3,$4,$5,now()+interval \'15 seconds\') RETURNING *', [randomUUID(), input.requestId, actor.userId, actor.sessionId, conversationId]);
       /** 数据库保证INSERT返回一行。 */
       const row = inserted.rows[0]!;
+      /** 【模块04】运行身份在启动事务中保存；客户端重试不能改变执行模式。 */
+      await client.query('UPDATE runs SET executor=$2,prompt_version=$3 WHERE id=$1',[row.id,this.config.env.CHAT_EXECUTOR,this.config.env.CHAT_EXECUTOR === 'agent' ? AGENT_PROMPT_VERSION : '']);
       /** 先分配两个单调消息位置，正文稍后随事件更新。 */
       await client.query('UPDATE conversations SET message_count=message_count+2,updated_at=now() WHERE id=$1', [conversationId]);
       /** 同一运行最多一条用户输入和一条助手正文。 */
       await client.query('INSERT INTO messages(id,run_id,conversation_id,role,content,position) VALUES($1,$2,$3,\'user\',$4,$5),($6,$2,$3,\'assistant\',\'\',$7)', [randomUUID(), row.id, conversationId, input.message, conversation.message_count + 1, randomUUID(), conversation.message_count + 2]);
       /** 开始事件先提交，再启动实际工作，避免运行身份丢失。 */
-      await this.appendLocked(client, row, 'run.started', { mode: 'diagnostic', message: '持久化运行已开始；当前执行系统自检，模型编排属于第四模块。' });
+      await this.appendLocked(client, row, 'run.started', { mode: this.config.env.CHAT_EXECUTOR, message: this.config.env.CHAT_EXECUTOR === 'agent' ? '模块04 · 已启动真实Deep Agents旅行助手' : '已启动持久化系统自检（显式诊断模式）' });
       /** 提交方得到固定运行ID，重试不会生成第二轮输入。 */
       return { run: publicRun(row), created: true };
     /** 结束启动事务。 */
@@ -146,5 +154,19 @@ export class RuntimeRepository {
   async renew(runId: string): Promise<boolean> { const result = await this.storage.sql.query('UPDATE runs r SET lease_until=now()+interval \'15 seconds\' FROM refresh_sessions s,users u WHERE r.id=$1 AND r.status=\'running\' AND NOT r.cancel_requested AND s.id=r.session_id AND s.revoked_at IS NULL AND s.expires_at>now() AND u.id=r.user_id AND u.disabled_at IS NULL RETURNING r.id', [runId]); return Boolean(result.rowCount); }
   /** 查找过期任务时限制批次，恢复器不会一次读取全部历史。 */
   async expired(): Promise<string[]> { const result = await this.storage.sql.query('SELECT id FROM runs WHERE status=\'running\' AND lease_until<now() LIMIT 40'); return result.rows.map((row) => row.id as string); }
+  /** 【模块04】从数据库生成可信上下文；客户端不能注入别人的历史或system角色。 */
+  async agentInput(runId: string): Promise<AgentInput> {
+    /** 首先获取运行的不可变所有权与本轮消息位置。 */
+    const result = await this.storage.sql.query('SELECT r.*,m.position FROM runs r JOIN messages m ON m.run_id=r.id AND m.role=\'user\' WHERE r.id=$1',[runId]); const run = result.rows[0]; if (!run) throw new NotFoundException('运行不存在');
+    /** 只读取同一用户、同一会话且不晚于当前输入的最多十三条普通消息。 */
+    const history = await this.storage.sql.query('SELECT m.role,m.content FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.conversation_id=$1 AND r.user_id=$2 AND m.position<=$3 AND (m.role=\'user\' OR r.status=\'completed\') ORDER BY m.position DESC LIMIT 13',[run.conversation_id,run.user_id,run.position]);
+    /** 按完整消息裁剪最多24000字符，最新用户输入总会保留。 */
+    let characters = 0; const messages = history.rows.filter((row) => { characters += row.content.length; return characters <= 24000; }).reverse().map((row) => ({role:row.role as 'user'|'assistant',content:row.content as string}));
+    /** 偏好归属同样由运行用户决定，不能由请求体自报。 */
+    const profile = await this.storage.sql.query('SELECT home_city,preferred_mode,pace FROM traveler_profiles WHERE user_id=$1',[run.user_id]); const value = profile.rows[0];
+    /** 只返回执行器需要的字段，不包含登录令牌或密码摘要。 */
+    return {runId,userId:run.user_id,conversationId:run.conversation_id,messages,profile:{homeCity:value?.home_city ?? '',preferredMode:value?.preferred_mode ?? 'independent',pace:value?.pace ?? 'balanced'}};
+  /** 结束可信历史装配。 */
+  }
 /** 结束运行仓储。 */
 }

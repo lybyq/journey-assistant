@@ -41,6 +41,19 @@ const environmentSchema = z.object({
   /** 外部工具密钥不能被公开健康接口序列化。 */
   AMAP_MAPS_API_KEY: z.string().default(""),
   TAVILY_API_KEY: z.string().default(""),
+  /** 【模块04】默认真实智能体；诊断仅供本机验收。 */
+  CHAT_EXECUTOR: z.enum(['agent', 'diagnostic']).default('agent'),
+  /** 【模块04】硬时限、调用次数和累计token预算。 */
+  AGENT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300000).default(120000),
+  AGENT_MAX_MODEL_CALLS: z.coerce.number().int().min(1).max(30).default(12),
+  AGENT_MAX_TOOL_CALLS: z.coerce.number().int().min(1).max(40).default(20),
+  AGENT_MAX_TOKENS: z.coerce.number().int().min(1000).max(200000).default(50000),
+  /** 【模块05】只接受预置服务器，空值关闭外部工具。 */
+  MCP_SERVERS: z.string().default('train,amap,tavily').refine((value) => value.split(',').filter(Boolean).every((id) => ['train','amap','tavily'].includes(id.trim())), '仅允许预置MCP服务'),
+  /** 【模块05】连接、执行与熔断冷却的时间上限。 */
+  MCP_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(15000),
+  MCP_TOOL_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(20000),
+  MCP_CIRCUIT_MS: z.coerce.number().int().min(1000).max(300000).default(30000),
   /** 结束环境结构定义。 */
 });
 /** 从校验器推导环境类型，保证配置服务和工厂使用同一规范。 */
@@ -49,6 +62,8 @@ export type Environment = z.infer<typeof environmentSchema>;
 export function parseEnvironment(input: Record<string, unknown>): Environment {
   /** 先执行结构校验，阻止不合法的启动参数。 */
   const parsed = environmentSchema.safeParse(input);
+  /** 【模块04】生产环境不能用诊断正文冒充模型输出。 */
+  if (parsed.success && parsed.data.NODE_ENV === 'production' && parsed.data.CHAT_EXECUTOR === 'diagnostic') throw new Error('生产环境禁止 CHAT_EXECUTOR=diagnostic');
   /** 启用真实身份模块时拒绝不完整的数据库、缓存或签名配置。 */
   if (parsed.success && parsed.data.STORAGE_ENABLED === 'true' && (!/^postgres(ql)?:\/\//.test(parsed.data.DATABASE_URL) || !/^rediss?:\/\//.test(parsed.data.REDIS_URL) || Buffer.byteLength(parsed.data.AUTH_SECRET) < 32)) throw new Error('启用存储必须配置 DATABASE_URL、REDIS_URL 和至少32字节的 AUTH_SECRET');
   /** 只列出错误字段路径，不把可能含凭据的字段内容写入日志。 */

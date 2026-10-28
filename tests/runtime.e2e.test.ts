@@ -1,5 +1,7 @@
 /** 第三模块测试使用真实且独立的PostgreSQL数据库，不污染开发数据。 */
 import { Pool } from 'pg';
+/** 【模块04】HTTP模型fixture只监听本机，不消耗真实供应商额度。 */
+import { createServer } from 'node:http';
 /** Redis测试只清理随机命名空间，不使用FLUSHDB。 */
 import { createClient } from 'redis';
 /** 真实API子进程保留Nest装饰器元数据。 */
@@ -9,7 +11,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 /** 使用真实HTTP断言而非mock身份服务。 */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 /** 认证响应采用网页共同使用的schema。 */
-import { conversationSnapshotSchema, startRunResponseSchema, serverEventSchema, type ServerEvent, authResponseSchema, type AuthResponse } from '@journey/contracts';
+import { healthSchema, conversationSnapshotSchema, startRunResponseSchema, serverEventSchema, type ServerEvent, authResponseSchema, type AuthResponse } from '@journey/contracts';
 /** 随机数据库名被严格限制为本测试自己的资源。 */
 const databaseName = `journey_runtime_test_${randomUUID().replaceAll('-', '')}`;
 /** 测试数据库连接可显式配置，默认使用本项目独立容器。 */
@@ -28,6 +30,8 @@ const redisUrl = process.env.TEST_REDIS_URL ?? 'redis://127.0.0.1:56379'; const 
 const secret = randomBytes(48).toString('base64url'); const password = 'A-long-test-passphrase-2026!';
 /** 保留当前测试服务器及监听地址。 */
 let server: ChildProcess; let base = '';
+/** 【模块04】只有指定用例切换真实智能体执行器，其余第三模块回归仍明确使用自检。 */
+let executor: 'diagnostic' | 'agent' = 'diagnostic'; let modelBase = '';
 /** 保存两个独立认证上下文来验证跨用户隔离。 */
 let alice: AuthResponse; let bob: AuthResponse; let aliceCookie = ''; let bobCookie = ''; let conversationId = '';
 /** 在随机端口启动服务，初始化会自动验证迁移账本。 */
@@ -37,7 +41,7 @@ async function startServer(): Promise<void> {
   /** 测试不暴露公网，也不调用模型或MCP。 */
   const script = `import { createApplication } from ${JSON.stringify(bootstrap)}; const app=await createApplication({logger:false}); await app.listen(0,'127.0.0.1'); console.log('RUNTIME_TEST:'+await app.getUrl());`;
   /** 显式设置存储配置，覆盖开发环境文件但不修改文件。 */
-  server = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, NODE_ENV: 'test', STORAGE_ENABLED: 'true', DATABASE_URL: testUrl.href, REDIS_URL: redisUrl, REDIS_PREFIX: prefix, AUTH_SECRET: secret, ENABLE_DIAGNOSTICS: 'false', CORS_ORIGINS: 'http://localhost:5173' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  server = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, NODE_ENV: 'test', CHAT_EXECUTOR: executor, LLM_API_KEY:'fixture-key', LLM_MODEL:'fixture-model', LLM_BASE_URL:modelBase, MCP_SERVERS: '', STORAGE_ENABLED: 'true', DATABASE_URL: testUrl.href, REDIS_URL: redisUrl, REDIS_PREFIX: prefix, AUTH_SECRET: secret, ENABLE_DIAGNOSTICS: 'false', CORS_ORIGINS: 'http://localhost:5173' }, stdio: ['ignore', 'pipe', 'pipe'] });
   /** 只有实际监听后才允许发送测试请求。 */
   base = await new Promise<string>((resolve, reject) => { let output = ''; let errors = ''; const timer = setTimeout(() => reject(new Error('身份测试服务启动超时')), 15000); server.stderr?.on('data', (chunk) => { errors += String(chunk); }); server.stdout?.on('data', (chunk) => { output += String(chunk); const match = /RUNTIME_TEST:(http:\/\/[^\s]+)/.exec(output); if (match?.[1]) { clearTimeout(timer); resolve(match[1]); } }); server.once('exit', (code) => { clearTimeout(timer); reject(new Error(`身份测试服务退出：${code} ${errors}`)); }); server.once('error', (error) => { clearTimeout(timer); reject(error); }); });
 /** 结束真实服务启动。 */
@@ -80,6 +84,18 @@ async function stream(after: number, until: (events: ServerEvent[]) => boolean, 
 }
 /** 覆盖身份隔离、重放一致性与真实任务生命周期。 */
 describe('第三模块持久化运行验收', () => {
+  /** 完整HTTP→归属历史→真实Deep Agents→SSE/数据库链路，验证记忆不会跨用户。 */
+  it('第四模块通过真实HTTP运行并装配当前用户历史与偏好',async()=>{
+    /** 此用例独立注册账户，不依赖后续第三模块用例的初始化顺序。 */
+    const response=await request('/auth/register',{method:'POST',body:{email:'agent-owner@example.invalid',password,displayName:'智能体HTTP验收'}});const owner=authResponseSchema.parse(await response.json());const own=await request('/conversations',{method:'POST',token:owner.accessToken,body:{title:'模块04真实HTTP记忆'}});const id=(await own.json()).id;await request('/me/profile',{method:'PATCH',token:owner.accessToken,body:{homeCity:'杭州',preferredMode:'driving',pace:'relaxed'}});
+    /** fixture只记录模型输入，绝不读取或输出认证请求头。 */
+    const seen:string[]=[];const fixture=createServer(async(req,res)=>{let text='';for await(const part of req)text+=String(part);const body=JSON.parse(text);seen.push(JSON.stringify(body.messages));res.writeHead(200,{'Content-Type':'text/event-stream'});const chunk={id:'fixture-http',object:'chat.completion.chunk',created:1,model:'fixture-model',choices:[{index:0,delta:{role:'assistant',content:'## 本机模型协议验收\n\n消息记忆来自真实数据库。'},finish_reason:null}]};res.write(`data: ${JSON.stringify(chunk)}\n\n`);res.write(`data: ${JSON.stringify({...chunk,choices:[{index:0,delta:{},finish_reason:'stop'}],usage:{prompt_tokens:20,completion_tokens:10,total_tokens:30}})}\n\n`);res.end('data: [DONE]\n\n');});await new Promise<void>(resolve=>fixture.listen(0,'127.0.0.1',resolve));const address=fixture.address();if(!address||typeof address==='string')throw new Error('模型fixture监听失败');
+    /** 重启API切换显式测试配置，不改写本地.env。 */
+    try{await stopServer();executor='agent';modelBase=`http://127.0.0.1:${address.port}/v1`;await startServer();for(const message of ['ALICE_ONLY_MEMORY：我的出发地是杭州','请结合上一条消息继续回答']){const started=await request(`/conversations/${id}/runs`,{method:'POST',token:owner.accessToken,body:{requestId:randomUUID(),message}});expect(started.status).toBe(201);await waitFor(async()=>{const saved=conversationSnapshotSchema.parse(await(await request(`/conversations/${id}/messages`,{token:owner.accessToken})).json());return saved.run?.status==='completed';});}expect(seen).toHaveLength(2);expect(seen[1]).toContain('ALICE_ONLY_MEMORY');expect(seen[1]).toContain('杭州');expect(seen[1]).toContain('driving');const rows=await db.query('SELECT executor,prompt_version FROM runs WHERE conversation_id=$1',[id]);expect(rows.rows.every(row=>row.executor==='agent'&&row.prompt_version==='journey-v1.0')).toBe(true);expect((await db.query('SELECT count(*)::int AS n FROM agent_checkpoints.checkpoints WHERE thread_id LIKE $1',[`${owner.user.id}:${id}:%`])).rows[0].n).toBeGreaterThan(0);}
+    /** 还原明确的第三模块自检模式，再释放本用例的本机模型服务器。 */
+    finally{await stopServer();executor='diagnostic';modelBase='';await startServer();fixture.closeAllConnections();await new Promise<void>(resolve=>fixture.close(()=>resolve()));}
+  /** 结束完整第四模块HTTP验收。 */
+  },30000);
   /** 注册独立用户并创建真实归属会话。 */
   it('准备两个独立账户和会话', async () => { for (const name of ['alice','bob']) { const response = await request('/auth/register', { method: 'POST', body: { email: `${name}@example.invalid`, password, displayName: `${name}运行验收` } }); const auth = authResponseSchema.parse(await response.json()); if (name === 'alice') { alice = auth; aliceCookie = cookie(response); } else { bob = auth; bobCookie = cookie(response); } } const response = await request('/conversations', { method: 'POST', token: alice.accessToken, body: { title: '持久化旅行对话' } }); conversationId = (await response.json()).id; expect((await snapshot()).items).toEqual([]); });
   /** HTTP、历史、流和取消都要求当前有效用户且不能越权。 */
@@ -91,7 +107,7 @@ describe('第三模块持久化运行验收', () => {
     /** 连接断开不取消执行器，补发最终能收到成功终态。 */
     const replay = await stream(cursor, (events) => events.some((event) => event.type === 'run.completed')); const events = [...first.events, ...replay.events]; expect(events.map((event) => event.sequence)).toEqual(events.map((_, index) => index + 1)); expect(new Set(events.map((event) => event.id)).size).toBe(events.length);
     /** 已保存正文必须和所有增量恰好一致。 */
-    const saved = await snapshot(); const text = events.filter((event) => event.type === 'message.delta').map((event) => event.payload.content).join(''); expect(saved.items).toHaveLength(2); expect(saved.items.find((item) => item.role === 'assistant')!.content).toBe(text); expect(saved.run?.id).toBe(run.id); expect(saved.run?.status).toBe('completed'); expect(saved.sequence).toBe(events.length); expect(saved.events.filter((event) => ['run.completed','run.failed','run.cancelled'].includes(event.type))).toHaveLength(1); const tool = saved.events.find((event) => event.type === 'tool.completed'); expect(tool?.type === 'tool.completed' && tool.payload.output.runtime).toBe(process.version);
+    const saved = await snapshot(); const text = events.filter((event) => event.type === 'message.delta').map((event) => event.payload.content).join(''); expect(saved.items).toHaveLength(2); expect(saved.items.find((item) => item.role === 'assistant')!.content).toBe(text); expect(saved.run?.id).toBe(run.id); expect(saved.run?.status).toBe('completed'); expect(saved.sequence).toBe(events.length); expect(saved.events.filter((event) => ['run.completed','run.failed','run.cancelled'].includes(event.type))).toHaveLength(1); const tool = saved.events.find((event) => event.type === 'tool.completed'); expect(tool?.type === 'tool.completed' && healthSchema.parse(tool.payload.output).runtime).toBe(process.version);
   /** 结束真实重放验证。 */
   });
   /** 重试同一请求ID不会再次执行，也不能修改原始输入。 */
@@ -103,7 +119,7 @@ describe('第三模块持久化运行验收', () => {
   /** 归档会话允许查历史，但不能执行新任务。 */
   it('归档会话拒绝新运行且不破坏历史', async () => { await request(`/conversations/${conversationId}`, { method: 'PATCH', token: alice.accessToken, body: { archived: true } }); expect((await request(`/conversations/${conversationId}/runs`, { method: 'POST', token: alice.accessToken, body: { requestId: randomUUID(), message: '不应执行' } })).status).toBe(409); expect((await snapshot()).items).toHaveLength(4); await request(`/conversations/${conversationId}`, { method: 'PATCH', token: alice.accessToken, body: { archived: false } }); });
   /** 模拟执行进程真正终止，重启后租约恢复器不能冒充成功重跑工具。 */
-  it('进程中断后恢复唯一失败终态，已完成历史仍可读取', async () => { const run = await start('进程中断验收'); await stopServer(); await db.query('UPDATE runs SET lease_until=now()-interval \'1 second\' WHERE id=$1', [run.id]); await startServer(); await waitFor(async () => (await snapshot()).run?.status === 'failed'); const saved = await snapshot(); expect(saved.items).toHaveLength(6); expect(saved.events.filter((event) => event.type === 'run.failed')).toHaveLength(1); expect(saved.events.some((event) => event.type === 'run.completed')).toBe(false); expect((await db.query('SELECT name FROM journey_migrations')).rows).toHaveLength(2); }, 20000);
+  it('进程中断后恢复唯一失败终态，已完成历史仍可读取', async () => { const run = await start('进程中断验收'); await stopServer(); await db.query('UPDATE runs SET lease_until=now()-interval \'1 second\' WHERE id=$1', [run.id]); await startServer(); await waitFor(async () => (await snapshot()).run?.status === 'failed'); const saved = await snapshot(); expect(saved.items).toHaveLength(6); expect(saved.events.filter((event) => event.type === 'run.failed')).toHaveLength(1); expect(saved.events.some((event) => event.type === 'run.completed')).toBe(false); expect((await db.query('SELECT name FROM journey_migrations')).rows).toHaveLength(3); }, 20000);
   /** 退出后流连接会关闭，已发出的JWT也不能继续读取历史。 */
   it('登出撤销长连接和活动任务', async () => { await start('退出时停止任务'); const controller = new AbortController(); const response = await fetch(`${base}/api/v1/conversations/${conversationId}/events?after=${(await snapshot()).sequence}`, { headers: { Authorization: `Bearer ${alice.accessToken}` }, signal: controller.signal }); const reader = response.body!.getReader(); await reader.read(); await request('/auth/logout', { method: 'POST', cookie: aliceCookie }); let done = false; const timer = setTimeout(() => controller.abort(), 5000); try { while (!done) done = (await reader.read()).done; } finally { clearTimeout(timer); controller.abort(); } expect(done).toBe(true); expect((await request(`/conversations/${conversationId}/messages`, { token: alice.accessToken })).status).toBe(401); await waitFor(async () => (await db.query('SELECT status FROM runs ORDER BY created_at DESC LIMIT 1')).rows[0].status === 'cancelled'); expect(bobCookie).toBeTruthy(); });
 /** 结束第三模块真实资源验收。 */

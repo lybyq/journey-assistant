@@ -121,9 +121,9 @@ onMounted(() => { void identity.restore(); });
           <!-- 诊断工作台继续开放，消息与事件均通过身份绑定通道持久化。 -->
           <template v-else>
             <!-- 会话标题来自已验证元数据。 -->
-            <div class="workspace-heading"><div><span class="small-dot"></span><span>{{ selectedTitle }}</span></div><button type="button" @click="activeView = 'roadmap'">对话与实时运行已就绪<ArrowUpRight :size="11" /></button></div>
+            <div class="workspace-heading"><div><span class="small-dot"></span><span>{{ selectedTitle }}</span></div><button type="button" @click="activeView = 'roadmap'">模块04 / 05 已接入<ArrowUpRight :size="11" /></button></div>
             <!-- 清楚标注当前保存范围，避免把元数据当完整消息历史。 -->
-            <p v-if="identity.selectedId" class="conversation-scope">消息与轨迹实时保存 · 断线自动补发 · 当前执行系统自检，第四模块接入智能体</p>
+            <p v-if="identity.selectedId" class="conversation-scope">消息与轨迹实时保存 · 断线自动补发 · 04 智能体编排 · 05 MCP 工具；可查看步骤摘要和实际结果</p>
             <!-- 欢迎示例只填写草稿。 -->
             <div v-if="chat.state.status === 'idle' && !history.length" class="welcome-scroll"><WelcomePanel @choose="draft = $event" /></div>
             <!-- 回答仍由真实服务事件驱动。 -->
@@ -141,7 +141,7 @@ onMounted(() => { void identity.restore(); });
       <!-- 结束内容行。 -->
       </div>
       <!-- 页脚标注当前交付版本。 -->
-      <footer class="app-footer"><span><Check :size="10" />多轮历史 · 实时保存 · 断线恢复</span><span>行也 JOURNEY <i>·</i> MODULE 03</span></footer>
+      <footer class="app-footer"><span><Check :size="10" />多轮历史 · 实时保存 · 断线恢复</span><span>行也 JOURNEY <i>·</i> MODULE 04 / 05</span></footer>
     <!-- 结束主地标。 -->
     </main>
     <!-- 认证表单不保存密码到仓库，原生dialog负责焦点恢复。 -->

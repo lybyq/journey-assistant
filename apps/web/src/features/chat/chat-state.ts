@@ -1,5 +1,5 @@
 /** 使用共享协议，让状态归约器可被 Web 和未来小程序共同使用。 */
-import type { ServerEvent } from "@journey/contracts";
+import type { ServerEvent, PublicTodo, McpStatus } from "@journey/contracts";
 /** 定义一次工具执行的公开记录。 */
 export interface ToolTrace {
   /** callId 对齐开始与完成事件；name 保留真实工具名称。 */
@@ -9,7 +9,7 @@ export interface ToolTrace {
   input: Record<string, unknown>;
   output?: unknown;
   /** 标记工具执行状态及实际耗时。 */
-  status: "running" | "completed" | "interrupted";
+  status: "running" | "completed" | "interrupted" | "failed";
   durationMs?: number;
   /** 结束工具记录结构。 */
 }
@@ -28,6 +28,10 @@ export interface ChatState {
   tools: ToolTrace[];
   /** 可读失败信息供 aria-live 区域通知用户。 */
   error: string;
+  /** 【模块04】真实计划、执行器模式和累计计数，不能当作内部推理展示。 */
+  mode: 'diagnostic' | 'agent'; plan: PublicTodo[]; usage: {modelCalls:number;toolCalls:number;totalTokens:number;estimated:boolean};
+  /** 【模块05】本轮实际连接状态由事件恢复，不靠配置存在推测。 */
+  mcp: McpStatus[];
   /** 结束聊天状态结构。 */
 }
 /** 每次新建状态都返回全新数组，防止不同运行共享可变集合。 */
@@ -40,6 +44,8 @@ export function initialChatState(): ChatState {
     progress: [],
     tools: [],
     error: "",
+    /** 【模块04/05】空态不生成假计划、假使用量和假连接。 */
+    mode: 'agent', plan: [], usage: {modelCalls:0,toolCalls:0,totalTokens:0,estimated:false}, mcp: [],
   };
 }
 /** 将单个已验证服务事件归约成状态；纯函数便于测试取消和乱序隔离。 */
@@ -55,9 +61,17 @@ export function reduceChatEvent(
   if (["completed", "cancelled", "failed"].includes(state.status)) return state;
   /** 每类事件明确更新对应字段，不使用动态键修改导致隐式耦合。 */
   switch (event.type) {
+    /** 【模块04】公开模型阶段只更新计数和步骤，不追加隐藏内容。 */
+    case 'agent.step': return {...state,usage:{modelCalls:event.payload.modelCalls,toolCalls:event.payload.toolCalls,totalTokens:event.payload.totalTokens,estimated:event.payload.estimated},progress:[...state.progress,{title:`模块04 · ${event.payload.name}`,detail:event.payload.stage.endsWith('started') ? '调用开始' : '调用完成'}]};
+    /** 【模块04】计划从write_todos真实执行结果恢复。 */
+    case 'run.plan': return {...state,plan:event.payload.todos};
+    /** 【模块05】供应商失败与模型运行状态相互独立。 */
+    case 'mcp.status': return {...state,mcp:event.payload.servers};
+    /** 【模块05】单个工具失败必须可见，但不直接宣判整个运行失败。 */
+    case 'tool.failed': return {...state,tools:state.tools.map((tool)=>tool.callId===event.payload.callId ? {...tool,status:'failed',output:{code:event.payload.code,message:event.payload.message},durationMs:event.payload.durationMs}:tool)};
     /** 开始运行时确认加载状态。 */
     case "run.started":
-      return { ...state, status: "running" };
+      return { ...state, status: "running", mode: event.payload.mode };
     /** 公开步骤使用只读数组追加方式更新。 */
     case "run.progress":
       return { ...state, progress: [...state.progress, event.payload] };

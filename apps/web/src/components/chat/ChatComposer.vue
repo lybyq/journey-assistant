@@ -82,7 +82,7 @@ function onKeydown(event: KeyboardEvent): void {
       ></textarea>
       <!-- 底部明确当前运行范围，避免框架诊断被误认作真实报价。 -->
       <div class="composer-actions">
-        <span>当前：持久化对话自检</span
+        <span>04 智能体 · 05 MCP 工具</span
         ><button
           v-if="busy"
           type="button"
@@ -106,7 +106,7 @@ function onKeydown(event: KeyboardEvent): void {
     </form>
     <!-- 不把估算包装成实时交易价格，底座阶段也明确说明。 -->
     <p class="composer-footnote">
-      当前尚未接入旅行规划与实时报价。Enter 发送，Shift + Enter 换行。
+      报价以工具证据为准；缺失数据会明确说明。Enter 发送，Shift + Enter 换行。
     </p>
     <!-- 结束输入区域。 -->
   </div>

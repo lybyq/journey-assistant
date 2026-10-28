@@ -12,7 +12,9 @@ import { RuntimeRepository } from './runtime.repository.js';
 import { RuntimeService } from './runtime.service.js';
 /** 流控制器处理历史、心跳、补发和背压。 */
 import { RuntimeController, StreamConnections } from './runtime.controller.js';
+/** 【模块04】第三模块只调度运行，实际智能体执行委托第四模块。 */
+import { AgentModule } from '../agent/agent.module.js';
 /** 注册网关，后续第三模块会在此扩展真正的聊天流和事件重放。 */
-@Module({ imports: [HealthModule, IdentityModule], controllers: [RuntimeController], providers: [DiagnosticGateway, RuntimeRepository, RuntimeService, StreamConnections] })
+@Module({ imports: [HealthModule, IdentityModule, AgentModule], controllers: [RuntimeController], providers: [DiagnosticGateway, RuntimeRepository, RuntimeService, StreamConnections] })
 /** 实时模块与业务模型分离，便于后续替换传输或增加小程序入口。 */
 export class RealtimeModule {}

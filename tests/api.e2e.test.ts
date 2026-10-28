@@ -21,7 +21,7 @@ beforeAll(async () => {
   /** 子进程脚本仅启动真实应用并报告随机监听地址。 */
   const script = `import { createApplication } from ${JSON.stringify(bootstrapUrl)}; const app = await createApplication({ logger: false }); await app.listen(0, '127.0.0.1'); console.log('TEST_SERVER:' + await app.getUrl());`;
   /** 填入哨兵密钥，确保公开响应中不会出现秘密值。 */
-  server = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, STORAGE_ENABLED: 'false', NODE_ENV: 'test', ENABLE_DIAGNOSTICS: 'true', LLM_API_KEY: 'test-key-never-expose', LLM_MODEL: 'model-not-called', AMAP_MAPS_API_KEY: 'amap-key-never-expose', TAVILY_API_KEY: 'tavily-key-never-expose', CORS_ORIGINS: 'http://localhost:5173' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  server = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, STORAGE_ENABLED: 'false', NODE_ENV: 'test', CHAT_EXECUTOR: 'diagnostic', MCP_SERVERS: '', ENABLE_DIAGNOSTICS: 'true', LLM_API_KEY: 'test-key-never-expose', LLM_MODEL: 'model-not-called', AMAP_MAPS_API_KEY: 'amap-key-never-expose', TAVILY_API_KEY: 'tavily-key-never-expose', CORS_ORIGINS: 'http://localhost:5173' }, stdio: ['ignore', 'pipe', 'pipe'] });
   /** 在真正监听成功后再开始发请求。 */
   baseUrl = await new Promise<string>((resolve, reject) => {
     /** 启动失败时快速报错，避免测试永久等待。 */
@@ -91,7 +91,7 @@ describe('框架端到端', () => {
   /** 未定义路由也应返回统一错误结构和有效请求标识。 */
   it('未知路由返回受控错误且清理非法追踪标识', async () => { const response = await fetch(`${baseUrl}/api/v1/missing`, { headers: { 'x-request-id': 'bad value' } }); const body = await response.json(); expect(response.status).toBe(404); expect(body.requestId).not.toBe('bad value'); expect(body).not.toHaveProperty('stack'); });
   /** 模块状态必须与用户要求的逐步交付一致。 */
-  it('路线清单只把前三个模块标成完成', async () => { const response = await fetch(`${baseUrl}/api/v1/system/modules`); const modules = await response.json() as { phase: number; status: string }[]; expect(modules).toHaveLength(14); expect(modules.filter((item) => item.status === 'ready').map((item) => item.phase)).toEqual([1, 2, 3]); });
+  it('路线清单只把前五个模块标成完成', async () => { const response = await fetch(`${baseUrl}/api/v1/system/modules`); const modules = await response.json() as { phase: number; status: string }[]; expect(modules).toHaveLength(14); expect(modules.filter((item) => item.status === 'ready').map((item) => item.phase)).toEqual([1, 2, 3, 4, 5]); });
   /** 验证工具结果、逐段文本、序号和唯一成功终态来自真实服务。 */
   it('完整自检返回真实工具结果与有序文本增量', async () => {
     /** 先等协议握手，再发送运行请求。 */
@@ -103,7 +103,7 @@ describe('框架端到端', () => {
     /** 必须存在工具完成且输出为当前 Node 进程的真实信息。 */
     const tool = probe.events.find((event) => event.type === 'tool.completed'); expect(tool?.type).toBe('tool.completed');
     /** 类型收窄之后验证精确工具与结构。 */
-    if (tool?.type === 'tool.completed') { expect(tool.payload.name).toBe('system.health'); expect(tool.payload.output.runtime).toBe(process.version); expect(JSON.stringify(tool)).not.toContain('never-expose'); }
+    if (tool?.type === 'tool.completed') { expect(tool.payload.name).toBe('system.health'); expect(healthSchema.parse(tool.payload.output).runtime).toBe(process.version); expect(JSON.stringify(tool)).not.toContain('never-expose'); }
     /** 多个文本块组成回答，并且明确标记诊断范围。 */
     const deltas = probe.events.filter((event) => event.type === 'message.delta'); expect(deltas.length).toBeGreaterThan(1); expect(deltas.map((event) => event.payload.content).join('')).toContain('没有调用语言模型');
     /** 序号必须严格递增，成功终态只能出现一次。 */

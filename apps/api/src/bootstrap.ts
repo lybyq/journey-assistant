@@ -66,11 +66,11 @@ export async function createApplication(options: NestApplicationOptions = {}) {
       app,
       new DocumentBuilder()
         .setTitle("行也 · 旅行助手 API")
-        .setDescription('模块01～03：工程底座、账户、持久化对话与认证实时流；旅游智能体按后续模块开放。')
+        .setDescription('模块01～05：账户与实时对话、模块04 Deep Agents编排、模块05 MCP工具中心；旅游智能体按后续模块开放。')
         /** 为受保护路由注册标准Bearer认证方案。 */
         .addBearerAuth()
         /** 文档版本反映第二模块交付。 */
-        .setVersion('0.3.0')
+        .setVersion('0.5.0')
         .build(),
     );
     /** 同时生成 /api/docs 页面和 /api/docs-json 机器可读规范。 */

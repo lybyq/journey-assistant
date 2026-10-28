@@ -118,6 +118,8 @@ export function useChatSession() {
   async function cancel(): Promise<void> { if (submitting.value || !chat.busy || !chat.state.runId || !identity.selectedId) return; error.value = ''; const version = generation; try { await authenticatedRequest(`/conversations/${identity.selectedId}/runs/${chat.state.runId}/cancel`, { method: 'POST', body: {} }); if (version === generation && connection.value !== 'online') await connect(); } catch (cause) { if (version === generation) error.value = cause instanceof Error ? cause.message : '停止请求失败，请重试'; } }
   /** 用户或会话切换同步清理私有内容并使旧请求作废。 */
   watch(() => [identity.user?.id, identity.selectedId], () => { messages.value = []; chat.reset(); error.value = ''; pending = undefined; void connect(); }, { flush: 'sync' });
+  /** 【模块04/05】运行终态后重新读取真实集成状态，不能一直展示初次加载的旧快照。 */
+  watch(() => chat.state.status, (status) => { if (!['completed','cancelled','failed'].includes(status)) return; const version=generation; void fetchHealth().then((value) => { if(version===generation)health.value=value; }).catch(()=>undefined); });
   /** 健康探针与登录独立，失败不伪装在线。 */
   onMounted(() => { void fetchHealth().then((value) => { health.value = value; }).catch(() => { health.value = null; }); void connect(); });
   /** 离开页面只关闭传输，后台任务继续受超时与租约约束。 */

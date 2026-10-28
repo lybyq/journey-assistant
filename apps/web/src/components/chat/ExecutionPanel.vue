@@ -27,15 +27,19 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
     <!-- 说明面板内容是执行摘要，避免将其当作模型内部推理。 -->
     <p class="panel-description">查看步骤摘要、工具调用与返回结果。</p>
     <!-- 没有运行时显示真实空态，不填充伪造工具步骤。 -->
-    <div v-if="state.status === 'idle'" class="trace-empty"><div class="empty-orbit"><Activity :size="21" /></div><strong>每一步，都有依据</strong><p>发送消息后，执行进度<br />和真实工具结果会出现在这里。</p><span>当前开放框架自检</span></div>
+    <div v-if="state.status === 'idle'" class="trace-empty"><div class="empty-orbit"><Activity :size="21" /></div><strong>每一步，都有依据</strong><p>发送消息后，执行进度<br />和真实工具结果会出现在这里。</p><span>模块04 智能体 · 模块05 MCP</span></div>
     <!-- 只要有实际运行，就逐项展示真实事件。 -->
     <div v-else class="trace-content">
+      <!-- 【模块04】真实公开计划与累计调用量，独立于工具连接状态。 -->
+      <section class="learning-block"><strong>04 · Deep Agents 编排</strong><p>模型 {{ state.usage.modelCalls }} 次 · 工具 {{ state.usage.toolCalls }} 次 · {{ state.usage.estimated ? '约 ' : '' }}{{ state.usage.totalTokens }} tokens</p><ol v-if="state.plan.length" class="plan-list"><li v-for="(item,index) in state.plan" :key="index" :class="item.status">{{ item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '◉' : '○' }} {{ item.content }}</li></ol><p v-else>{{ state.status === 'running' ? '等待实际计划工具执行' : '本轮未生成待办计划；简单问题可直接调用工具' }}；此处不展示隐藏推理。</p></section>
+      <!-- 【模块05】真实连接状态与白名单独立展示，单个失败不会冒充就绪。 -->
+      <section v-if="state.mcp.length" class="learning-block"><strong>05 · MCP 连接与工具</strong><details v-for="server in state.mcp" :key="server.id" class="server-detail"><summary>{{ server.label }} · {{ server.state === 'ready' ? '已连接' : server.state === 'disabled' ? '未启用' : server.state === 'unconfigured' ? '未配置' : server.state === 'idle' ? '待连接' : server.state === 'connecting' ? '连接中' : server.state === 'circuit_open' ? '熔断冷却' : '暂不可用' }} · {{ server.toolCount }} 个工具</summary><p v-if="server.lastError" class="tool-error">{{ server.lastError }}</p><code v-for="name in server.allowedTools" :key="name">{{ name }}</code></details></section>
       <!-- 当前运行概览不使用假百分比。 -->
       <div class="run-status"><LoaderCircle v-if="state.status === 'running'" class="spin" :size="16" /><Check v-else-if="state.status === 'completed'" :size="16" /><CircleDashed v-else :size="16" /><span>{{ state.status === 'running' ? '运行进行中' : state.status === 'completed' ? '运行已完成' : state.status === 'cancelled' ? '运行已停止' : '运行未完成' }}</span><small>{{ completedCount }} 次工具完成</small></div>
       <!-- 步骤只来自后端公开的 progress 事件。 -->
       <ol class="steps"><li v-for="(step, index) in state.progress" :key="`${state.runId}-${index}`"><span class="step-index">{{ String(index + 1).padStart(2, '0') }}</span><div><strong>{{ step.title }}</strong><p>{{ step.detail }}</p></div></li></ol>
       <!-- 每个工具调用独立折叠，不把大量 JSON 直接塞进回答。 -->
-      <details v-for="tool in state.tools" :key="tool.callId" class="tool-detail" open><summary><Code2 :size="14" /><span>{{ tool.name }}</span><Check v-if="tool.status === 'completed'" :size="13" /><LoaderCircle v-else-if="tool.status === 'running'" :size="13" class="spin" /><small>{{ tool.durationMs !== undefined ? `${tool.durationMs.toFixed(1)} ms` : tool.status === 'interrupted' ? '中断' : '执行中' }}</small><ChevronDown class="chevron" :size="13" /></summary><div class="tool-body"><span class="json-label">调用参数</span><pre>{{ pretty(tool.input) }}</pre><span class="json-label"><ArrowDownToLine :size="11" />返回结果</span><pre>{{ pretty(tool.output) }}</pre></div></details>
+      <details v-for="tool in state.tools" :key="tool.callId" class="tool-detail" open><summary><Code2 :size="14" /><span><small>{{ /^(train|amap|tavily)__/.test(tool.name) ? '05' : '04' }}</small> {{ tool.name }}</span><Check v-if="tool.status === 'completed'" :size="13" /><LoaderCircle v-else-if="tool.status === 'running'" :size="13" class="spin" /><small>{{ tool.status === 'failed' ? '失败 · ' : tool.status === 'interrupted' ? '中断 · ' : '' }}{{ tool.durationMs !== undefined ? `${tool.durationMs.toFixed(1)} ms` : tool.status === 'running' ? '执行中' : '' }}</small><ChevronDown class="chevron" :size="13" /></summary><div class="tool-body"><span class="json-label">调用参数</span><pre>{{ pretty(tool.input) }}</pre><span class="json-label"><ArrowDownToLine :size="11" />返回结果</span><pre>{{ pretty(tool.output) }}</pre></div></details>
     <!-- 结束真实轨迹区域。 -->
     </div>
     <!-- 集成状态与执行记录分开，配置就绪不等于工具已调用。 -->
@@ -47,6 +51,16 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
 <!-- 次要信息使用更紧凑的排版，保持主回答的阅读空间。 -->
 <style scoped>
 /** 面板自然滚动，不遮盖主工作区输入。 */
+/** 【模块04/05】轻量学习分区，保持主回答为阅读中心。 */
+.learning-block { margin: 16px 0; padding-bottom: 15px; border-bottom: 1px solid var(--line); font-size: 11px; line-height: 1.8; }
+/** 计划状态由实际write_todos事件更新。 */
+.learning-block p, .plan-list { font-size: 10px; color: var(--muted); padding-left: 0; list-style: none; }
+/** 完成与进行中状态既有符号也有颜色。 */
+.plan-list .completed { color: var(--forest); } .plan-list .in_progress { color: #967a40; }
+/** 白名单折叠展示，避免长工具名撑开侧栏。 */
+.server-detail { margin: 8px 0; } .server-detail code { display: block; overflow-wrap: anywhere; font-size: 9px; }
+/** 工具错误明确可见。 */
+.tool-error { color: #9b4f34; }
 .execution-panel { width: 310px; flex-shrink: 0; border-left: 1px solid var(--line); background: #f8f9f3; padding: 31px 23px 23px; overflow-y: auto; scrollbar-width: thin; }
 /** 标题与可追溯标识分置两端。 */
 .execution-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

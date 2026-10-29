@@ -1,0 +1,64 @@
+# 仅暴露本机网页端口，公网入口与TLS由部署方明确配置。
+name: journey-production
+services:
+  postgres:
+    image: postgres:17.6-alpine3.22
+    environment:
+      POSTGRES_DB: journey
+      POSTGRES_USER: journey
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请配置生产数据库密码}
+    volumes: [journey-postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U journey -d journey']
+      interval: 5s
+      retries: 12
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?请配置生产Redis密码}
+    command: [/bin/sh, -c, 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
+    volumes: [journey-redis:/data]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping']
+      interval: 5s
+      retries: 12
+    restart: unless-stopped
+  api:
+    build: { context: .., dockerfile: apps/api/Dockerfile }
+    env_file: ${JOURNEY_PRODUCTION_ENV:-./production.env}
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      STORAGE_ENABLED: 'true'
+      ENABLE_DIAGNOSTICS: 'false'
+      CHAT_EXECUTOR: agent
+      DATABASE_URL: ${DATABASE_URL:?请配置容器内数据库连接}
+      REDIS_URL: ${REDIS_URL:?请配置容器内Redis连接}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3000/api/v1/system/storage').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+    volumes: [../.local/production-backups:/workspace/.local/backups]
+    restart: unless-stopped
+    init: true
+  web:
+    build: { context: .., dockerfile: apps/web/Dockerfile }
+    ports: ['127.0.0.1:8080:8080']
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
+volumes:
+  journey-postgres:
+  journey-redis:

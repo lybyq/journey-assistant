@@ -1,0 +1,7 @@
+# 生成文件、第三方依赖、本地凭据与验收产物由各自工具管理。
+node_modules/
+dist/
+coverage/
+.local/
+pnpm-lock.yaml
+apps/api/assets/fonts/

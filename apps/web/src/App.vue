@@ -8,5 +8,5 @@ import { RouterView } from 'vue-router';
 <template>
   <!-- 渲染当前工作台页面。 -->
   <RouterView />
-<!-- 结束根模板。 -->
+  <!-- 结束根模板。 -->
 </template>

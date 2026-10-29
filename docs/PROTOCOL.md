@@ -1,8 +1,8 @@
 # 实时事件协议 v1
 
-## 第三模块生产通道
+## 持久化对话生产通道
 
-网页已切换为Bearer认证的HTTP/SSE：`GET /api/v1/conversations/:id/events?after=<已确认序号>`。序号在同一会话内持久化递增，断线后补发且不取消后台运行；每秒心跳，25秒轮换连接。历史快照和运行/取消接口详见[第三模块协议与恢复说明](CONVERSATION.md)。以下 `/ws/chat` 内容仅描述保留的第一模块匿名开发诊断，不能用于生产私有对话。
+网页已切换为Bearer认证的HTTP/SSE：`GET /api/v1/conversations/:id/events?after=<已确认序号>`。序号在同一会话内持久化递增，断线后补发且不取消后台运行；每秒心跳，25秒轮换连接。历史快照和运行/取消接口详见[持久化对话协议与恢复说明](CONVERSATION.md)。以下 `/ws/chat` 内容仅描述保留的工程底座匿名开发诊断，不能用于生产私有对话。
 
 ## 开发诊断地址与封装
 
@@ -33,15 +33,15 @@
 
 ## 服务事件公共字段
 
-| 字段 | 说明 |
-| --- | --- |
-| protocolVersion | 当前固定为 1 |
-| id | 每条事件独立 UUID |
-| runId | 所属请求 UUID；连接事件和无法归属的错误为 null |
-| sequence | 当前连接内严格递增序号；当前不提供跨连接重放 |
-| timestamp | UTC ISO 时间；页面可按用户时区展示 |
-| type | 判别联合的事件名 |
-| payload | 必须与该事件类型对应的校验结构 |
+| 字段            | 说明                                           |
+| --------------- | ---------------------------------------------- |
+| protocolVersion | 当前固定为 1                                   |
+| id              | 每条事件独立 UUID                              |
+| runId           | 所属请求 UUID；连接事件和无法归属的错误为 null |
+| sequence        | 当前连接内严格递增序号；当前不提供跨连接重放   |
+| timestamp       | UTC ISO 时间；页面可按用户时区展示             |
+| type            | 判别联合的事件名                               |
+| payload         | 必须与该事件类型对应的校验结构                 |
 
 完整运行示例：
 
@@ -59,19 +59,19 @@ run.completed        # 唯一成功终态
 
 ## 事件字段
 
-| type | payload | 用途 |
-| --- | --- | --- |
-| session.ready | scope、message | 协议握手，当前 scope=foundation |
-| run.started | mode、message | 明确当前执行模式 |
-| run.progress | title、detail | 可核验的公开执行摘要 |
-| tool.started | callId、name、input | 实际工具名称及白名单参数 |
-| tool.completed | callId、name、output、durationMs | 当前 output 严格为真实健康快照 |
-| message.delta | content | 已确认的回答文本增量 |
-| run.completed | message | 成功终态 |
-| run.cancelled | message | 用户停止或连接断开引发的中止 |
-| run.failed | code、message | 受控错误，不发送底层堆栈 |
+| type           | payload                          | 用途                               |
+| -------------- | -------------------------------- | ---------------------------------- |
+| session.ready  | scope、message                   | 协议握手，当前 scope=foundation    |
+| run.started    | mode、message                    | 明确当前执行模式                   |
+| run.progress   | title、detail                    | 可核验的公开执行摘要               |
+| tool.started   | callId、name、input              | 实际工具名称及白名单参数           |
+| tool.completed | callId、name、output、durationMs | 诊断为健康快照；业务为安全结果信封 |
+| message.delta  | content                          | 已确认的回答文本增量               |
+| run.completed  | message                          | 成功终态                           |
+| run.cancelled  | message                          | 用户停止或连接断开引发的中止       |
+| run.failed     | code、message                    | 受控错误，不发送底层堆栈           |
 
-03/04/05 实现业务运行时扩展 schema，而不是把任意 unknown 工具结果未经校验直接透传。修改协议时同时更新共享包、服务端发送、前端归约与契约测试。
+实时运行、智能体编排和MCP工具共同扩展业务 schema，而不是把任意 unknown 工具结果未经校验直接透传。修改协议时同时更新共享包、服务端发送、前端归约与契约测试。
 
 ## 当前安全边界
 
@@ -83,12 +83,12 @@ run.completed        # 唯一成功终态
 - Markdown 先解析再用允许列表净化；不允许 iframe、script、图片、表单、事件属性或任意内联样式。
 - 点击来源仅允许绝对 HTTP/HTTPS URL，新窗口不保留 opener。
 
-## 后续生产扩展
+## 真实业务通道
 
-03已完成：身份绑定、心跳、事件持久化、游标恢复、补发与背压；详见生产通道文档。
+持久化运行：身份绑定、心跳、事件持久化、游标恢复、补发与背压；详见生产通道文档。
 
-04：把 SDK 实际流映射成公开事件；隐藏推理与系统提示词不进入该协议。
+智能体编排：把 SDK 实际流映射成公开事件；隐藏推理与系统提示词不进入该协议。
 
-05：工具错误、截断结果、超时、取消信号、脱敏摘要与受控原始结果详情。
+MCP工具：工具错误、截断结果、超时、取消信号、脱敏摘要与受控原始结果详情。
 
-12/13：结构化价格表、方案版本、行程段与来源引用，不依赖解析 Markdown 才能提取业务数据。
+预算与行程：结构化价格表、方案版本、行程段与来源引用，不依赖解析 Markdown 才能提取业务数据。

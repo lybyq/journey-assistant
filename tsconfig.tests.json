@@ -1,5 +1,12 @@
 {
   "extends": "./tsconfig.base.json",
-  "compilerOptions": { "module": "ESNext", "moduleResolution": "Bundler", "lib": ["ES2022", "DOM"], "noEmit": true, "experimentalDecorators": true, "types": ["node", "vitest/globals", "vite/client"] },
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM"],
+    "noEmit": true,
+    "experimentalDecorators": true,
+    "types": ["node", "vitest/globals", "vite/client"]
+  },
   "include": ["tests/**/*.ts", "vitest.config.ts"]
 }

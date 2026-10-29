@@ -1,0 +1,76 @@
+/** 工具目录按需公开Schema，避免每轮把所有供应商和表单结构发给模型。 */
+import { tool } from 'langchain';
+/** 目录只接受固定能力，不允许模型注册任意工具或网络地址。 */
+import { z } from 'zod';
+/** 能力选择仅改变本轮模型看到的工具，不扩大后端原有权限。 */
+const domains = z.enum([
+  'request',
+  'research',
+  'transport',
+  'driving',
+  'experiences',
+  'tours',
+  'budget',
+  'planning',
+  'weather',
+  'maps',
+]);
+/** 业务工具与明确领域关联，基础读取始终可见。 */
+const toolDomains: Record<string, string> = {
+  journey_trip_update: 'request',
+  journey_research: 'research',
+  journey_rail: 'transport',
+  journey_flights: 'transport',
+  journey_driving: 'driving',
+  journey_places: 'experiences',
+  journey_hotels: 'experiences',
+  journey_tours: 'tours',
+  journey_estimate_add: 'budget',
+  journey_plan_generate: 'planning',
+  journey_plan_adjust: 'planning',
+  task: 'research',
+  read_file: 'research',
+};
+/** 每次运行拥有独立目录，主代理和只读研究代理共用本轮已选择能力。 */
+export class ToolSelection {
+  /** 只保存能力名，不保存用户消息、供应商结果和认证数据。 */
+  private readonly enabled = new Set<string>();
+  /** 小问题只需要基础读取、时间与预算；复杂任务再加载所需工具。 */
+  allows(name: string): boolean {
+    if (
+      [
+        'journey_tools_select',
+        'journey_trip_read',
+        'journey_budget',
+        'journey_current_time',
+        'write_todos',
+      ].includes(name)
+    )
+      return true;
+    if (toolDomains[name]) return this.enabled.has(toolDomains[name]!);
+    if (name.startsWith('train__')) return this.enabled.has('transport');
+    if (name.startsWith('tavily__')) return this.enabled.has('research');
+    if (name === 'amap__maps_weather') return this.enabled.has('weather');
+    if (name.startsWith('amap__'))
+      return ['maps', 'experiences', 'driving'].some((domain) => this.enabled.has(domain));
+    return false;
+  }
+  /** 工具名称与参数在实际LangChain循环中执行，下一次模型请求才看到新增Schema。 */
+  tool() {
+    return tool(
+      async (input) => {
+        for (const domain of input.domains) this.enabled.add(domain);
+        return JSON.stringify({
+          enabled: [...this.enabled],
+          message: '所选能力的实际工具已在下一次模型调用中加载；缺配置仍会明确失败。',
+        });
+      },
+      {
+        name: 'journey_tools_select',
+        description:
+          '按需加载工具：request保存需求；research资料搜索；transport铁路航班；driving自驾；experiences地点酒店；tours跟团；budget录入用户估算；planning行程版本；weather天气；maps地图。一次最多选3种，普通问候无需调用。',
+        schema: z.object({ domains: z.array(domains).min(1).max(3) }).strict(),
+      },
+    );
+  }
+}

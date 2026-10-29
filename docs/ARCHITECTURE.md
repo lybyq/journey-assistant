@@ -8,20 +8,20 @@ Vue Web（当前） / 微信小程序（后续独立入口）
     │ 认证HTTP/SSE：运行、步骤、工具、增量、补发；HTTP取消
     ▼
 NestJS API
-    ├── 身份与数据归属（02）
-    ├── 对话与运行生命周期（03）
-    ├── Deep Agents / LangChain / LangGraph（04）
-    │       ├── MCP 工具中心（05）：12306 / 高德 / Tavily
+    ├── 身份与数据归属
+    ├── 对话与运行生命周期
+    ├── Deep Agents / LangChain / LangGraph
+    │       ├── MCP 工具中心：12306 / 高德 / Tavily
     │       └── 领域工具：交通 / 车辆 / 酒店 / 团游 / 费用
-    ├── 旅行需求与证据（06、07）
-    ├── 方案比较与行程验证（08～13）
-    └── 分享、导出与运营（14）
+    ├── 旅行需求与证据
+    ├── 方案比较与行程验证
+    └── 分享、导出与运营
             │
             ├── PostgreSQL：长期业务数据、会话、方案版本、报价证据
             └── Redis：短期状态、限流、缓存、事件转发
 ```
 
-当前01～05已实现：Vue → 认证HTTP/SSE → NestJS；身份与元数据使用Drizzle，消息/运行仓储复用同一pg池和参数化SQL，显式行锁控制序号与终态。Redis负责认证和实时连接限流。AgentModule实际执行Deep Agents图，McpModule提供受控外部工具；两者按04/05明确单向分层。详见[第三模块](CONVERSATION.md)。
+实际请求链路：Vue → 认证HTTP/SSE → NestJS；身份与元数据使用Drizzle，消息/运行仓储复用同一pg池和参数化SQL，显式行锁控制序号与终态。Redis负责认证和实时连接限流。AgentModule实际执行Deep Agents图，McpModule提供受控外部工具；两者按编排与外部工具明确单向分层。详见[持久化对话](CONVERSATION.md)。
 
 ## 为什么先做模块化单体
 
@@ -29,32 +29,32 @@ NestJS API
 
 ## 当前 API 模块
 
-| 模块 | 职责 | 当前真实行为 |
-| --- | --- | --- |
-| ConfigModule | 环境加载、校验与来源限制 | 启动前验证参数，不公开密钥 |
-| StorageModule | PostgreSQL、Redis、迁移和生命周期 | 真实连接、事务迁移、校验和与就绪探针 |
-| IdentityModule | 凭据、登录会话、刷新和自身资料 | 密码摘要、轮换重放检测、退出撤销与资料保存 |
-| ConversationsModule | 用户所属会话元数据 | 归属过滤、稳定游标、改名、可恢复归档 |
-| HealthModule | 当前进程健康与产品模块清单 | 返回真实时间、运行秒数、Node 版本及脱敏配置状态 |
-| RealtimeModule | 传输、诊断运行和事件映射 | 身份绑定的持久化运行、分页、心跳、重放、背压与取消 |
-| AgentModule | 真正 SDK 的延迟装配 | 真实模型、计划、子代理、共享预算、持久化检查点和公开事件映射 |
-| McpModule | MCP 适配器装配与退出清理 | 固定stdio/HTTP注册表、真实工具发现、白名单、超时、熔断与脱敏 |
+| 模块                | 职责                              | 当前真实行为                                                 |
+| ------------------- | --------------------------------- | ------------------------------------------------------------ |
+| ConfigModule        | 环境加载、校验与来源限制          | 启动前验证参数，不公开密钥                                   |
+| StorageModule       | PostgreSQL、Redis、迁移和生命周期 | 真实连接、事务迁移、校验和与就绪探针                         |
+| IdentityModule      | 凭据、登录会话、刷新和自身资料    | 密码摘要、轮换重放检测、退出撤销与资料保存                   |
+| ConversationsModule | 用户所属会话元数据                | 归属过滤、稳定游标、改名、可恢复归档                         |
+| HealthModule        | 当前进程健康与产品模块清单        | 返回真实时间、运行秒数、Node 版本及脱敏配置状态              |
+| RealtimeModule      | 传输、诊断运行和事件映射          | 身份绑定的持久化运行、分页、心跳、重放、背压与取消           |
+| AgentModule         | 真正 SDK 的延迟装配               | 真实模型、计划、子代理、共享预算、持久化检查点和公开事件映射 |
+| McpModule           | MCP 适配器装配与退出清理          | 固定stdio/HTTP注册表、真实工具发现、白名单、超时、熔断与脱敏 |
 
 ## 前端组件边界
 
-| 文件/层 | 唯一职责 | 数据契约 |
-| --- | --- | --- |
-| WorkspacePage | 组合导航、工作区与执行面板 | 不直接创建网络连接 |
-| AppSidebar | 导航与本地新建操作 | props：active/busy；emit：select/reset |
-| WelcomePanel | 影像与输入示例 | emit：choose；只填草稿，不自动请求 |
-| ChatComposer | 输入法、草稿、偏好、提交 | v-model：draft；props：busy/connected；emit：submit/cancel |
-| ChatThread | 当前对话与滚动跟随 | props：ChatState |
-| MarkdownAnswer | 净化、排版、链接与复制 | props：content/streaming |
-| ExecutionPanel | 公开步骤、工具参数与 JSON | props：state/health/mobileOpen；emit：close |
-| RoadmapPanel | 完整模块路线 | 读取共享清单；emit：back |
-| useChatSession | 连接、重连、提交、取消、卸载清理 | 通过认证fetch流与有界帧解析器访问网络 |
-| chat-state | 不依赖 Vue 的纯事件归约器 | 输入状态+事件，返回新状态 |
-| Pinia chat store | 当前标签页状态与操作 | 当前轮归约，历史由服务端快照提供 |
+| 文件/层          | 唯一职责                         | 数据契约                                                   |
+| ---------------- | -------------------------------- | ---------------------------------------------------------- |
+| WorkspacePage    | 组合导航、工作区与执行面板       | 不直接创建网络连接                                         |
+| AppSidebar       | 导航与本地新建操作               | props：active/busy；emit：select/reset                     |
+| WelcomePanel     | 影像与输入示例                   | emit：choose；只填草稿，不自动请求                         |
+| ChatComposer     | 输入法、草稿、偏好、提交         | v-model：draft；props：busy/connected；emit：submit/cancel |
+| ChatThread       | 当前对话与滚动跟随               | props：ChatState                                           |
+| MarkdownAnswer   | 净化、排版、链接与复制           | props：content/streaming                                   |
+| ExecutionPanel   | 公开步骤、工具参数与 JSON        | props：state/health/mobileOpen；emit：close                |
+| RoadmapPanel     | 完整产品能力                     | 读取共享清单；emit：back                                   |
+| useChatSession   | 连接、重连、提交、取消、卸载清理 | 通过认证fetch流与有界帧解析器访问网络                      |
+| chat-state       | 不依赖 Vue 的纯事件归约器        | 输入状态+事件，返回新状态                                  |
+| Pinia chat store | 当前标签页状态与操作             | 当前轮归约，历史由服务端快照提供                           |
 
 ## TypeScript 与依赖
 
@@ -68,7 +68,7 @@ Deep Agents 的 langsmith peer 范围为 `>=0.7.1 <0.10.0`；项目显式使用 
 
 可以公开：计划摘要、执行步骤、工具名称、已脱敏的参数、已脱敏的结果、耗时、来源、最终正文。不能直接转发：隐藏推理 token、系统提示词、私密 Key、认证头、数据库连接串或其他用户的数据。
 
-开发自检的system.health输出采用严格白名单。第五模块对固定注册表中的外部工具实施嵌套脱敏、输出限长、URL认证/查询清理、工具白名单和JSON Schema校验；模型和网页使用同一份处理结果。新增供应商仍须明确其权限与数据边界，不能自动继承现有批准范围。
+开发自检的system.health输出采用严格白名单。MCP工具中心对固定注册表中的外部工具实施嵌套脱敏、输出限长、URL认证/查询清理、工具白名单和JSON Schema校验；模型和网页使用同一份处理结果。新增供应商仍须明确其权限与数据边界，不能自动继承现有批准范围。
 
 ## 金额与证据
 
@@ -76,8 +76,12 @@ Deep Agents 的 langsmith peer 范围为 `>=0.7.1 <0.10.0`；项目显式使用 
 
 ## 当前运行边界
 
-开发默认 `127.0.0.1`；匿名 `/ws/chat` 仅是受开发开关控制的底座诊断。网页已使用带身份和归属校验的持久化生产对话通道；断线继续后台运行并按会话水位补发。04/05已接入真实模型与MCP；完整报价、行程和公网运营保障按06～14继续实施。
+开发默认 `127.0.0.1`；匿名 `/ws/chat` 仅是受开发开关控制的底座诊断。网页已使用带身份和归属校验的持久化生产对话通道；断线继续后台运行并按会话水位补发。问答已接入真实模型与MCP；旅行工作区共用领域服务，生产库存依赖供应商授权，公网部署需单独验收。
 
-## 模块04/05学习入口
+## 旅行服务学习入口
 
-依赖方向：RealtimeModule（03调度）→ AgentModule（04编排）→ McpModule（05工具）；McpModule不反向依赖模型或聊天。详见[04学习指南](MODULE-04-AGENT.md)和[05学习指南](MODULE-05-MCP.md)。
+依赖方向：RealtimeModule（运行调度）→ AgentModule（模型编排）→ McpModule（外部工具）；McpModule不反向依赖模型或聊天。详见[智能体学习指南](AGENT.md)和[MCP学习指南](MCP.md)。
+
+## 旅行服务集成补充
+
+旅行工作区与Deep Agents业务工具共用TravelModule。项目归属、CAS、不可变版本和分享分别持久化；预算计算独立整数计算，行程版本独立验证。学习入口见 [LEARNING.md](LEARNING.md)，部署与恢复见 [DEPLOYMENT.md](DEPLOYMENT.md)。当前验收范围见 [VERIFICATION.md](VERIFICATION.md)。

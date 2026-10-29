@@ -1,5 +1,5 @@
 /** 使用共享协议，让状态归约器可被 Web 和未来小程序共同使用。 */
-import type { ServerEvent, PublicTodo, McpStatus } from "@journey/contracts";
+import type { ServerEvent, PublicTodo, McpStatus } from '@journey/contracts';
 /** 定义一次工具执行的公开记录。 */
 export interface ToolTrace {
   /** callId 对齐开始与完成事件；name 保留真实工具名称。 */
@@ -9,14 +9,14 @@ export interface ToolTrace {
   input: Record<string, unknown>;
   output?: unknown;
   /** 标记工具执行状态及实际耗时。 */
-  status: "running" | "completed" | "interrupted" | "failed";
+  status: 'running' | 'completed' | 'interrupted' | 'failed';
   durationMs?: number;
   /** 结束工具记录结构。 */
 }
 /** 定义单次框架运行的界面状态，不与服务器历史持久化混为一谈。 */
 export interface ChatState {
   /** status 只描述本地可见运行状态。 */
-  status: "idle" | "running" | "completed" | "cancelled" | "failed";
+  status: 'idle' | 'running' | 'completed' | 'cancelled' | 'failed';
   /** 当前运行标识阻止旧连接数据污染新的回答。 */
   runId: string | null;
   /** 保存本次用户输入和已经收到的 Markdown 文本。 */
@@ -28,61 +28,102 @@ export interface ChatState {
   tools: ToolTrace[];
   /** 可读失败信息供 aria-live 区域通知用户。 */
   error: string;
-  /** 【模块04】真实计划、执行器模式和累计计数，不能当作内部推理展示。 */
-  mode: 'diagnostic' | 'agent'; plan: PublicTodo[]; usage: {modelCalls:number;toolCalls:number;totalTokens:number;estimated:boolean};
-  /** 【模块05】本轮实际连接状态由事件恢复，不靠配置存在推测。 */
+  /** 真实计划、执行器模式和累计计数，不能当作内部推理展示。 */
+  mode: 'diagnostic' | 'agent';
+  plan: PublicTodo[];
+  usage: {
+    modelCalls: number;
+    toolCalls: number;
+    totalTokens: number;
+    estimated: boolean;
+  };
+  /** 本轮实际连接状态由事件恢复，不靠配置存在推测。 */
   mcp: McpStatus[];
   /** 结束聊天状态结构。 */
 }
 /** 每次新建状态都返回全新数组，防止不同运行共享可变集合。 */
 export function initialChatState(): ChatState {
   return {
-    status: "idle",
+    status: 'idle',
     runId: null,
-    question: "",
-    answer: "",
+    question: '',
+    answer: '',
     progress: [],
     tools: [],
-    error: "",
-    /** 【模块04/05】空态不生成假计划、假使用量和假连接。 */
-    mode: 'agent', plan: [], usage: {modelCalls:0,toolCalls:0,totalTokens:0,estimated:false}, mcp: [],
+    error: '',
+    /** 空态不生成假计划、假使用量和假连接。 */
+    mode: 'agent',
+    plan: [],
+    usage: { modelCalls: 0, toolCalls: 0, totalTokens: 0, estimated: false },
+    mcp: [],
   };
 }
 /** 将单个已验证服务事件归约成状态；纯函数便于测试取消和乱序隔离。 */
-export function reduceChatEvent(
-  state: ChatState,
-  event: ServerEvent,
-): ChatState {
+export function reduceChatEvent(state: ChatState, event: ServerEvent): ChatState {
   /** 会话握手由连接层管理，不改变聊天回答。 */
-  if (event.type === "session.ready") return state;
+  if (event.type === 'session.ready') return state;
   /** 不接收其他运行的数据；null runId 的协议错误仍允许显示。 */
   if (event.runId && event.runId !== state.runId) return state;
   /** 当前运行进入终态后，忽略迟到的文本和工具事件。 */
-  if (["completed", "cancelled", "failed"].includes(state.status)) return state;
+  if (['completed', 'cancelled', 'failed'].includes(state.status)) return state;
   /** 每类事件明确更新对应字段，不使用动态键修改导致隐式耦合。 */
   switch (event.type) {
-    /** 【模块04】公开模型阶段只更新计数和步骤，不追加隐藏内容。 */
-    case 'agent.step': return {...state,usage:{modelCalls:event.payload.modelCalls,toolCalls:event.payload.toolCalls,totalTokens:event.payload.totalTokens,estimated:event.payload.estimated},progress:[...state.progress,{title:`模块04 · ${event.payload.name}`,detail:event.payload.stage.endsWith('started') ? '调用开始' : '调用完成'}]};
-    /** 【模块04】计划从write_todos真实执行结果恢复。 */
-    case 'run.plan': return {...state,plan:event.payload.todos};
-    /** 【模块05】供应商失败与模型运行状态相互独立。 */
-    case 'mcp.status': return {...state,mcp:event.payload.servers};
-    /** 【模块05】单个工具失败必须可见，但不直接宣判整个运行失败。 */
-    case 'tool.failed': return {...state,tools:state.tools.map((tool)=>tool.callId===event.payload.callId ? {...tool,status:'failed',output:{code:event.payload.code,message:event.payload.message},durationMs:event.payload.durationMs}:tool)};
-    /** 开始运行时确认加载状态。 */
-    case "run.started":
-      return { ...state, status: "running", mode: event.payload.mode };
-    /** 公开步骤使用只读数组追加方式更新。 */
-    case "run.progress":
-      return { ...state, progress: [...state.progress, event.payload] };
-    /** 工具开始时保留真实名称和参数。 */
-    case "tool.started":
+    /** 公开模型阶段只更新计数和步骤，不追加隐藏内容。 */
+    case 'agent.step':
       return {
         ...state,
-        tools: [...state.tools, { ...event.payload, status: "running" }],
+        usage: {
+          modelCalls: event.payload.modelCalls,
+          toolCalls: event.payload.toolCalls,
+          totalTokens: event.payload.totalTokens,
+          estimated: event.payload.estimated,
+        },
+        progress: [
+          ...state.progress,
+          {
+            title: `智能体编排 · ${event.payload.name}`,
+            detail: event.payload.stage.endsWith('started') ? '调用开始' : '调用完成',
+          },
+        ],
+      };
+    /** 计划从write_todos真实执行结果恢复。 */
+    case 'run.plan':
+      return { ...state, plan: event.payload.todos };
+    /** 供应商失败与模型运行状态相互独立。 */
+    case 'mcp.status':
+      return { ...state, mcp: event.payload.servers };
+    /** 单个工具失败必须可见，但不直接宣判整个运行失败。 */
+    case 'tool.failed':
+      return {
+        ...state,
+        tools: state.tools.map((tool) =>
+          tool.callId === event.payload.callId
+            ? {
+                ...tool,
+                status: 'failed',
+                output: {
+                  code: event.payload.code,
+                  message: event.payload.message,
+                },
+                durationMs: event.payload.durationMs,
+              }
+            : tool,
+        ),
+      };
+    /** 开始运行时确认加载状态。 */
+    case 'run.started':
+      return { ...state, status: 'running', mode: event.payload.mode };
+    /** 公开步骤使用只读数组追加方式更新。 */
+    case 'run.progress':
+      return { ...state, progress: [...state.progress, event.payload] };
+    /** 工具开始时保留真实名称和参数。 */
+    case 'tool.started':
+      return {
+        ...state,
+        tools: [...state.tools, { ...event.payload, status: 'running' }],
       };
     /** 根据 callId 精确完成同一次工具执行。 */
-    case "tool.completed":
+    case 'tool.completed':
       return {
         ...state,
         tools: state.tools.map((tool) =>
@@ -91,34 +132,34 @@ export function reduceChatEvent(
                 ...tool,
                 output: event.payload.output,
                 durationMs: event.payload.durationMs,
-                status: "completed",
+                status: 'completed',
               }
             : tool,
         ),
       };
     /** 仅追加当前运行的 Markdown 增量。 */
-    case "message.delta":
+    case 'message.delta':
       return { ...state, answer: state.answer + event.payload.content };
     /** 完成后进入不可继续追加的成功终态。 */
-    case "run.completed":
-      return { ...state, status: "completed" };
+    case 'run.completed':
+      return { ...state, status: 'completed' };
     /** 取消时保留已收到的内容，工具未完成则标记中断。 */
-    case "run.cancelled":
+    case 'run.cancelled':
       return {
         ...state,
-        status: "cancelled",
+        status: 'cancelled',
         tools: state.tools.map((tool) =>
-          tool.status === "running" ? { ...tool, status: "interrupted" } : tool,
+          tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
         ),
       };
     /** 错误信息来自受控协议，不显示内部堆栈。 */
-    case "run.failed":
+    case 'run.failed':
       return {
         ...state,
-        status: "failed",
+        status: 'failed',
         error: event.payload.message,
         tools: state.tools.map((tool) =>
-          tool.status === "running" ? { ...tool, status: "interrupted" } : tool,
+          tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
         ),
       };
     /** 结束穷尽事件分支。 */

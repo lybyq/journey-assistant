@@ -1,49 +1,50 @@
 <!-- 输入组件负责草稿、输入法处理和提交操作，不持有网络连接。 -->
 <script setup lang="ts">
 /** 浅层状态适合保存当前选择的出行偏好。 */
-import { computed, shallowRef, watch } from "vue";
+import { computed, shallowRef, watch } from 'vue';
 /** 读取基础旅行偏好的共享类型，不复制另一份出行方式枚举。 */
 import type { TravelerProfile } from '@journey/contracts';
 /** 统一使用线性图标表现发送与停止。 */
-import {
-  ArrowUp,
-  CarFront,
-  Compass,
-  Square,
-  UsersRound,
-} from "lucide-vue-next";
+import { ArrowUp, CarFront, Compass, Square, UsersRound } from 'lucide-vue-next';
 /** 使用显式 v-model 将草稿与父页面同步，示例选择也能更新此输入框。 */
 const draft = defineModel<string>({ required: true });
 /** 连接状态由父级传入，组件不能自行假定服务在线。 */
-const props = defineProps<{ busy: boolean; connected: boolean; pending?: boolean; preferredMode?: TravelerProfile['preferredMode'] }>();
+const props = defineProps<{
+  busy: boolean;
+  connected: boolean;
+  pending?: boolean;
+  preferredMode?: TravelerProfile['preferredMode'];
+}>();
 /** 明确声明提交与停止意图。 */
 const emit = defineEmits<{ submit: [message: string]; cancel: [] }>();
-/** 偏好只作为输入附加信息，真实约束解析属于第六模块。 */
-const mode = shallowRef("自由行");
+/** 偏好只作为输入附加信息，真实约束解析属于旅行需求。 */
+const mode = shallowRef('自由行');
 /** 登录或保存偏好时将账户默认方式同步到输入区，用户仍可临时切换。 */
-watch(() => props.preferredMode, (value) => { mode.value = value === 'driving' ? '自驾游' : value === 'group' ? '跟团游' : '自由行'; }, { immediate: true });
+watch(
+  () => props.preferredMode,
+  (value) => {
+    mode.value = value === 'driving' ? '自驾游' : value === 'group' ? '跟团游' : '自由行';
+  },
+  { immediate: true },
+);
 /** 静态选项不使用不必要的响应式代理。 */
 const modes = [
-  { name: "自由行", icon: Compass },
-  { name: "自驾游", icon: CarFront },
-  { name: "跟团游", icon: UsersRound },
+  { name: '自由行', icon: Compass },
+  { name: '自驾游', icon: CarFront },
+  { name: '跟团游', icon: UsersRound },
 ] as const;
 /** 从草稿与连接状态推导是否可发送。 */
 const sendable = computed(
   () =>
-    props.connected &&
-    !props.busy &&
-    draft.value.trim().length > 0 &&
-    draft.value.length <= 1800,
+    props.connected && !props.busy && draft.value.trim().length > 0 && draft.value.length <= 1800,
 );
 /** 发送时附带偏好，输入内容仍保留直到用户主动新建对话。 */
 function submit(): void {
-  if (sendable.value)
-    emit("submit", `出行偏好：${mode.value}。${draft.value.trim()}`);
+  if (sendable.value) emit('submit', `出行偏好：${mode.value}。${draft.value.trim()}`);
 }
 /** Enter 发送，Shift+Enter 换行；中文输入法确认候选时不能误发送。 */
 function onKeydown(event: KeyboardEvent): void {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     submit();
   }
@@ -67,8 +68,10 @@ function onKeydown(event: KeyboardEvent): void {
           :disabled="busy"
           @click="mode = item.name"
         >
-          <component :is="item.icon" :size="13" />{{ item.name }}</button
-        ><span class="input-limit">{{ draft.length }} / 1800</span>
+          <component :is="item.icon" :size="13" />
+          {{ item.name }}
+        </button>
+        <span class="input-limit">{{ draft.length }} / 1800</span>
       </div>
       <!-- textarea 带可访问标签，最多1800字，为传输附加信息留出空间。 -->
       <textarea
@@ -82,8 +85,8 @@ function onKeydown(event: KeyboardEvent): void {
       ></textarea>
       <!-- 底部明确当前运行范围，避免框架诊断被误认作真实报价。 -->
       <div class="composer-actions">
-        <span>04 智能体 · 05 MCP 工具</span
-        ><button
+        <span>旅行问答 · 工具与来源</span>
+        <button
           v-if="busy"
           type="button"
           class="send-button stop"
@@ -91,8 +94,9 @@ function onKeydown(event: KeyboardEvent): void {
           :disabled="pending"
           @click="emit('cancel')"
         >
-          <Square :size="13" fill="currentColor" /></button
-        ><button
+          <Square :size="13" fill="currentColor" />
+        </button>
+        <button
           v-else
           type="submit"
           class="send-button"
@@ -149,7 +153,7 @@ function onKeydown(event: KeyboardEvent): void {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
+  font-size: 13px;
   padding: 7px 9px;
   border-radius: 5px;
   color: #7b8577;
@@ -162,7 +166,7 @@ function onKeydown(event: KeyboardEvent): void {
 /** 字数提示靠右，避免与输入内容混淆。 */
 .input-limit {
   margin-left: auto;
-  font-size: 9px;
+  font-size: 12px;
   color: #899182;
   font-variant-numeric: tabular-nums;
 }
@@ -178,7 +182,7 @@ textarea {
   padding: 14px 3px 3px;
   color: var(--ink);
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.8;
   outline: none;
 }
@@ -196,7 +200,7 @@ textarea::placeholder {
 /** 明确说明运行范围，字号不低于辅助信息标准。 */
 .composer-actions > span {
   color: #7c8875;
-  font-size: 10px;
+  font-size: 13px;
 }
 /** 主要动作保持大于图标的命中范围。 */
 .send-button {
@@ -229,7 +233,7 @@ textarea::placeholder {
 }
 /** 页脚说明不增加额外面板。 */
 .composer-footnote {
-  font-size: 9px;
+  font-size: 12px;
   color: #92988a;
   text-align: center;
   margin: 12px 0 0;
@@ -238,19 +242,19 @@ textarea::placeholder {
 /** 手机维持可触达发送尺寸并略增输入字号。 */
 @media (max-width: 760px) {
   textarea {
-    font-size: 14px;
+    font-size: 16px;
     min-height: 64px;
   }
   .mode {
     padding: 8px;
-    font-size: 11px;
+    font-size: 13px;
   }
   .send-button {
     width: 42px;
     height: 42px;
   }
   .composer-footnote {
-    font-size: 9px;
+    font-size: 12px;
     margin-bottom: 4px;
   }
 }
@@ -262,4 +266,53 @@ textarea::placeholder {
   }
 }
 /** 结束输入样式。 */
+
+/** 输入区字号与正文一致，发送按钮提供明确的悬停和聚焦反馈。 */
+.composer {
+  border: 1px solid #cddbc0;
+  border-radius: 18px;
+  background: #fffef9;
+  box-shadow: 0 8px 30px #294b3020;
+}
+.composer textarea {
+  font-size: 17px;
+  line-height: 1.8;
+  min-height: 86px;
+}
+.mode {
+  font-size: 13px;
+  padding: 7px 11px;
+  border-radius: 8px;
+}
+.mode.selected {
+  background: #e7f0d5;
+  color: #315b36;
+}
+.composer-bottom {
+  font-size: 12px;
+}
+.composer-bottom > span {
+  font-size: 12px;
+}
+.input-limit {
+  font-size: 12px;
+}
+.send-button {
+  box-shadow: 0 5px 15px #264d3820;
+}
+.composer-wrap {
+  max-width: 930px;
+  width: 100%;
+  margin: 0 auto;
+}
+@media (max-width: 760px) {
+  .composer textarea {
+    font-size: 16px;
+    min-height: 72px;
+  }
+  .mode {
+    font-size: 12px;
+    padding: 6px 9px;
+  }
+}
 </style>

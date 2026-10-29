@@ -10,8 +10,15 @@ import type { ChatState } from '@/features/chat/chat-state';
 import type { PersistedMessage } from '@journey/contracts';
 /** 富文本组件集中负责解析净化与复制。 */
 import MarkdownAnswer from './MarkdownAnswer.vue';
+/** 公开计划和实际工具在正文前提供可展开的阅读入口。 */
+import JourneyProgress from './JourneyProgress.vue';
 /** 父组件只传入已归约的运行状态。 */
-const props = defineProps<{ state: ChatState; history: PersistedMessage[]; hasMore: boolean; loadingHistory: boolean }>();
+const props = defineProps<{
+  state: ChatState;
+  history: PersistedMessage[];
+  hasMore: boolean;
+  loadingHistory: boolean;
+}>();
 /** 翻页由父级网络服务执行，组件不直接发请求。 */
 const emit = defineEmits<{ more: [] }>();
 /** 使用 Vue 3.5 类型安全的模板引用。 */
@@ -21,11 +28,31 @@ const followBottom = shallowRef(true);
 /** 合并连续增量引发的滚动任务。 */
 let frame = 0;
 /** 记录用户是否仍在接近滚动底部的位置。 */
-function onScroll(): void { const el = scroller.value; if (el) followBottom.value = el.scrollHeight - el.clientHeight - el.scrollTop < 90; }
+function onScroll(): void {
+  const el = scroller.value;
+  if (el) followBottom.value = el.scrollHeight - el.clientHeight - el.scrollTop < 90;
+}
 /** 新运行时重置滚动意图，旧回答不会影响新对话。 */
-watch(() => props.state.runId, () => { followBottom.value = true; });
+watch(
+  () => props.state.runId,
+  () => {
+    followBottom.value = true;
+  },
+);
 /** 回答与步骤更新后在下一帧滚动，只在用户仍愿意跟随时生效。 */
-watch(() => [props.state.answer, props.state.progress.length, props.state.status], async () => { await nextTick(); if (!followBottom.value) return; cancelAnimationFrame(frame); frame = requestAnimationFrame(() => { const el = scroller.value; if (el) el.scrollTop = el.scrollHeight; }); }, { immediate: true });
+watch(
+  () => [props.state.answer, props.state.progress.length, props.state.status],
+  async () => {
+    await nextTick();
+    if (!followBottom.value) return;
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => {
+      const el = scroller.value;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  },
+  { immediate: true },
+);
 /** 组件卸载时释放尚未执行的动画帧。 */
 onUnmounted(() => cancelAnimationFrame(frame));
 /** 结束对话组件脚本。 */
@@ -35,50 +62,316 @@ onUnmounted(() => cancelAnimationFrame(frame));
   <!-- 不把逐 token 文本设置成 aria-live，避免读屏重复播报。 -->
   <div ref="scroller" class="thread" @scroll.passive="onScroll">
     <!-- 向上分页保持当前阅读位置，不把整个会话一次载入内存。 -->
-    <button v-if="hasMore" type="button" class="history-more" :disabled="loadingHistory" @click="emit('more')">{{ loadingHistory ? '正在读取…' : '加载更早的消息' }}</button>
+    <button
+      v-if="hasMore"
+      type="button"
+      class="history-more"
+      :disabled="loadingHistory"
+      @click="emit('more')"
+    >
+      {{ loadingHistory ? '正在读取…' : '加载更早的消息' }}
+    </button>
     <!-- 历史以真实消息ID去重，用户内容始终按普通文本转义。 -->
-    <div v-for="message in history" :key="message.id" class="message saved-message"><span :class="['message-avatar', message.role === 'user' ? 'user-avatar' : 'assistant-avatar']"><UserRound v-if="message.role === 'user'" :size="15" /><Route v-else :size="18" /></span><div class="assistant-content"><div class="message-meta">{{ message.role === 'user' ? '你' : '行也' }}<span>已保存 · {{ new Date(message.createdAt).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit' }) }}{{ message.role === 'assistant' ? ` · ${message.status === 'completed' ? '已完成' : message.status === 'cancelled' ? '已停止' : message.status === 'failed' ? '未完成' : '运行中'}` : '' }}</span></div><p v-if="message.role === 'user'" class="question">{{ message.content }}</p><MarkdownAnswer v-else :content="message.content || '本轮未产生正文。'" :streaming="false" /></div></div>
+    <div
+      v-for="message in history"
+      :key="message.id"
+      :class="[
+        'message',
+        'saved-message',
+        message.role === 'user' ? 'saved-user' : 'saved-assistant',
+      ]"
+    >
+      <span
+        :class="['message-avatar', message.role === 'user' ? 'user-avatar' : 'assistant-avatar']"
+      >
+        <UserRound v-if="message.role === 'user'" :size="15" />
+        <Route v-else :size="18" />
+      </span>
+      <div class="assistant-content">
+        <div class="message-meta">
+          {{ message.role === 'user' ? '你' : '行也' }}
+          <span>
+            已保存 ·
+            {{
+              new Date(message.createdAt).toLocaleString('zh-CN', {
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            }}{{
+              message.role === 'assistant'
+                ? ` · ${message.status === 'completed' ? '已完成' : message.status === 'cancelled' ? '已停止' : message.status === 'failed' ? '未完成' : '运行中'}`
+                : ''
+            }}
+          </span>
+        </div>
+        <p v-if="message.role === 'user'" class="question">
+          {{ message.content }}
+        </p>
+        <MarkdownAnswer
+          v-else
+          :content="message.content || '本轮未产生正文。'"
+          :streaming="false"
+        />
+      </div>
+    </div>
     <!-- 用户原文使用插值转义，不能被当成 HTML 执行。 -->
-    <div v-if="state.runId" class="message user-message"><span class="message-avatar user-avatar"><UserRound :size="15" /></span><div><div class="message-meta">你<span>当前对话 · 已保存</span></div><p class="question">{{ state.question }}</p></div></div>
-    <!-- 助手回答标明本次是框架验证。 -->
-    <div v-if="state.runId" class="message assistant-message"><span class="message-avatar assistant-avatar"><Route :size="18" /></span><div class="assistant-content"><div class="message-meta">行也<span>{{ state.mode === 'agent' ? 'Deep Agents · 模块04' : '系统自检' }}</span></div><div v-if="state.progress.length" class="progress-summary"><LoaderCircle v-if="state.status === 'running'" :size="13" class="spin" /><Check v-else :size="13" /><span>{{ state.progress.at(-1)?.title }}</span><small>{{ state.status === 'running' ? '进行中' : state.status === 'cancelled' ? '已停止' : state.status === 'failed' ? '未完成' : '已完成' }}</small></div><MarkdownAnswer :content="state.answer" :streaming="state.status === 'running'" /><p v-if="state.error" class="run-error" role="alert">{{ state.error }}</p><p v-if="state.status === 'cancelled'" class="cancelled-note" role="status">已停止，已接收的内容已保留。</p></div></div>
+    <div v-if="state.runId" class="message user-message">
+      <span class="message-avatar user-avatar"><UserRound :size="15" /></span>
+      <div>
+        <div class="message-meta">
+          你
+          <span>当前对话 · 已保存</span>
+        </div>
+        <p class="question">{{ state.question }}</p>
+      </div>
+    </div>
+    <!-- 助手回答区分旅行问答与用户主动运行的系统自检。 -->
+    <div v-if="state.runId" class="message assistant-message">
+      <span class="message-avatar assistant-avatar"><Route :size="18" /></span>
+      <div class="assistant-content">
+        <div class="message-meta">
+          行也
+          <span>{{ state.mode === 'agent' ? '你的旅行助手' : '系统自检' }}</span>
+        </div>
+        <div v-if="state.progress.length" class="progress-summary">
+          <LoaderCircle v-if="state.status === 'running'" :size="13" class="spin" />
+          <Check v-else :size="13" />
+          <span>{{ state.progress.at(-1)?.title }}</span>
+          <small>
+            {{
+              state.status === 'running'
+                ? '进行中'
+                : state.status === 'cancelled'
+                  ? '已停止'
+                  : state.status === 'failed'
+                    ? '未完成'
+                    : '已完成'
+            }}
+          </small>
+        </div>
+        <JourneyProgress :state="state" />
+        <MarkdownAnswer :content="state.answer" :streaming="state.status === 'running'" />
+        <p v-if="state.error" class="run-error" role="alert">
+          {{ state.error }}
+        </p>
+        <p v-if="state.status === 'cancelled'" class="cancelled-note" role="status">
+          已停止，已接收的内容已保留。
+        </p>
+      </div>
+    </div>
     <!-- 只播报运行终态，辅助技术不被文本增量淹没。 -->
-    <span class="sr-only" role="status" aria-live="polite">{{ state.status === 'completed' ? '本轮回答完成' : state.status === 'cancelled' ? '运行已停止' : '' }}</span>
-  <!-- 结束对话滚动区域。 -->
+    <span class="sr-only" role="status" aria-live="polite">
+      {{
+        state.status === 'completed'
+          ? '本轮回答完成'
+          : state.status === 'cancelled'
+            ? '运行已停止'
+            : ''
+      }}
+    </span>
+    <!-- 结束对话滚动区域。 -->
   </div>
-<!-- 结束对话模板。 -->
+  <!-- 结束对话模板。 -->
 </template>
 <!-- 对话使用自然段落布局，避免在每句话外面套卡片。 -->
 <style scoped>
 /** 相对定位把读屏状态限制在消息滚动容器内，长历史不会撑出外层页面。 */
-.thread { position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 12px 2px 30px; scrollbar-width: thin; scrollbar-color: #cdd8ca transparent; }
+.thread {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 2px 30px;
+  scrollbar-width: thin;
+  scrollbar-color: #cdd8ca transparent;
+}
 /** 更早消息采用轻量入口，保持正文为主要阅读平面。 */
-.history-more { display: block; margin: 0 auto 24px; padding: 9px 18px; border: 1px solid var(--line); border-radius: 18px; color: var(--forest); font-size: 11px; }
+.history-more {
+  display: block;
+  margin: 0 auto 24px;
+  padding: 9px 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  color: var(--forest);
+  font-size: 13px;
+}
 /** 图标与正文之间保留适中间距。 */
-.message { display: flex; gap: 14px; max-width: 760px; margin: 0 auto 35px; }
+.message {
+  display: flex;
+  gap: 14px;
+  max-width: 760px;
+  margin: 0 auto 35px;
+}
 /** 固定头像尺寸避免文本增量导致布局抖动。 */
-.message-avatar { display: grid; place-items: center; width: 30px; height: 30px; flex-shrink: 0; border-radius: 50%; }
+.message-avatar {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
 /** 用户符号采用中性背景。 */
-.user-avatar { color: #738069; background: #e7ebdf; }
+.user-avatar {
+  color: #738069;
+  background: #e7ebdf;
+}
 /** 助手符号使用品牌色。 */
-.assistant-avatar { background: var(--forest); color: #fff; border-radius: 9px; }
+.assistant-avatar {
+  background: var(--forest);
+  color: #fff;
+  border-radius: 9px;
+}
 /** 姓名和模式标注自然排列。 */
-.message-meta { display: flex; align-items: center; gap: 12px; font-size: 12px; font-weight: 600; margin: 6px 0 13px; }
+.message-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  margin: 6px 0 13px;
+}
 /** 模式说明降低对比但保持可见。 */
-.message-meta > span { font-size: 10px; color: var(--muted); font-weight: 400; }
+.message-meta > span {
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 400;
+}
 /** 问题文本保留换行并自动断词。 */
-.question { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.9; font-size: 13px; margin: 0; }
+.question {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.9;
+  font-size: 14px;
+  margin: 0;
+}
 /** 正文容器最小宽度归零，使表格能在内部滚动。 */
-.assistant-content { flex: 1; min-width: 0; }
+.assistant-content {
+  flex: 1;
+  min-width: 0;
+}
 /** 步骤摘要是可验证的执行状态，不显示模型内部推理。 */
-.progress-summary { display: flex; align-items: center; gap: 7px; margin: 6px 0 21px; color: #60785b; font-size: 11px; }
+.progress-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 6px 0 21px;
+  color: #60785b;
+  font-size: 13px;
+}
 /** 次要执行状态与步骤名称分开显示。 */
-.progress-summary small { margin-left: 5px; color: #8d9784; font-size: 9px; }
+.progress-summary small {
+  margin-left: 5px;
+  color: #8d9784;
+  font-size: 12px;
+}
 /** 错误文字配合 role=alert 保证失败可见。 */
-.run-error { color: #9a4d35; line-height: 1.7; font-size: 12px; }
+.run-error {
+  color: #9a4d35;
+  line-height: 1.7;
+  font-size: 14px;
+}
 /** 取消提示保留用户已获得的内容。 */
-.cancelled-note { font-size: 12px; color: var(--muted); margin-top: 18px; }
+.cancelled-note {
+  font-size: 14px;
+  color: var(--muted);
+  margin-top: 18px;
+}
 /** 手机适当缩小正文缩进。 */
-@media (max-width: 760px) { .message { gap: 10px; } .message-avatar { width: 26px; height: 26px; } .question { font-size: 14px; } }
+@media (max-width: 760px) {
+  .message {
+    gap: 10px;
+  }
+  .message-avatar {
+    width: 26px;
+    height: 26px;
+  }
+  .question {
+    font-size: 16px;
+  }
+}
 /** 结束对话样式。 */
+
+/** 问题和回答拥有不同阅读形态，正文保留足够行长而不挤满侧栏。 */
+.thread {
+  padding-top: 18px;
+}
+.message {
+  max-width: 880px;
+  gap: 15px;
+  margin-bottom: 34px;
+}
+.message-avatar {
+  width: 34px;
+  height: 34px;
+}
+.question {
+  font-size: 16px;
+  line-height: 1.85;
+}
+.message-meta {
+  font-size: 15px;
+  margin-bottom: 14px;
+}
+.message-meta > span {
+  font-size: 12px;
+}
+.user-message > div,
+.saved-user .assistant-content {
+  background: #eaf0df;
+  border: 1px solid #dae4ca;
+  border-radius: 16px 16px 16px 4px;
+  padding: 15px 21px;
+  max-width: 90%;
+  flex: initial;
+}
+.user-message .message-meta,
+.saved-user .message-meta {
+  margin-top: 0;
+}
+.assistant-avatar {
+  background: #214b38;
+  color: #d5e8a8;
+  box-shadow: 0 4px 13px #214b3820;
+}
+.progress-summary {
+  font-size: 13px;
+  margin-bottom: 15px;
+}
+.progress-summary small {
+  font-size: 12px;
+}
+.saved-user .message-meta {
+  font-size: 14px;
+}
+.run-error {
+  padding: 17px 20px;
+  border: 1px solid #e5c6b5;
+  background: #fff3e9;
+  border-radius: 12px;
+  font-size: 15px;
+}
+.cancelled-note {
+  font-size: 14px;
+}
+@media (max-width: 760px) {
+  .message {
+    gap: 9px;
+  }
+  .message-avatar {
+    width: 28px;
+    height: 28px;
+  }
+  .user-message > div,
+  .saved-user .assistant-content {
+    max-width: 94%;
+    padding: 12px 15px;
+  }
+  .question {
+    font-size: 16px;
+  }
+  .message-meta > span {
+    font-size: 12px;
+  }
+}
 </style>

@@ -1,0 +1,17 @@
+/** 工具领域同时用于服务器批准集合和界面的业务名称。 */
+export const BUSINESS_TOOL_DOMAINS = {
+  journey_tools_select: '能力目录',
+  journey_trip_read: '旅行需求',
+  journey_trip_update: '旅行需求',
+  journey_research: '资料检索',
+  journey_rail: '铁路交通',
+  journey_flights: '航班查询',
+  journey_driving: '自驾路线',
+  journey_places: '地点查询',
+  journey_hotels: '住宿报价',
+  journey_tours: '旅行团',
+  journey_budget: '预算计算',
+  journey_estimate_add: '费用估算',
+  journey_plan_generate: '行程编排',
+  journey_plan_adjust: '行程调整',
+} as const;

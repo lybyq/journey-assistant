@@ -1,0 +1,14 @@
+# 构建上下文拒绝秘密、依赖产物、私人备份与临时验收资料。
+.git
+node_modules
+**/node_modules
+**/dist
+**/.env*
+**/*.env
+**/*.env.*
+**/*.pem
+**/*.key
+.local
+backups
+coverage
+*.log

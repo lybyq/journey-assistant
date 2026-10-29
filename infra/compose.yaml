@@ -1,4 +1,4 @@
-# 这些服务供第二模块接入；第一模块不会启动或假装已连接它们。
+# 这些服务供身份与存储接入；工程底座不会启动或假装已连接它们。
 name: journey-local
 # 数据服务只绑定本机，禁止把本地演示凭据用于公网环境。
 services:
@@ -17,7 +17,7 @@ services:
     # 使用命名卷跨容器重建保留数据。
     volumes:
       - journey_postgres:/var/lib/postgresql/data
-    # 第二模块可依此等待真实数据库就绪。
+    # 身份与存储可依此等待真实数据库就绪。
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U journey -d journey']
       interval: 10s

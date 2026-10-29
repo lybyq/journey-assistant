@@ -18,6 +18,9 @@ coverage/
 *.pfx
 *.dump
 *.sql.gz
+# 生产环境文件也采用普通文件名；示例模板仍可提交。
+*.env
+!*.env.example
 # 忽略本地日志、截图和浏览器测试输出。
 *.log
 .local/

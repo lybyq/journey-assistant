@@ -1,0 +1,28 @@
+# 提交和PR均执行真实存储、身份、模型协议与旅行质量回归。
+name: Journey checks
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17.6-alpine3.22
+        env: { POSTGRES_USER: journey, POSTGRES_PASSWORD: journey_ci, POSTGRES_DB: journey }
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U journey -d journey" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://journey:journey_ci@127.0.0.1:5432/journey
+      TEST_REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.34.6 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22.20.0, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check

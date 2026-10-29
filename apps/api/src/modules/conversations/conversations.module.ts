@@ -1,4 +1,4 @@
-/** 会话控制器只提供元数据，不提前实现第三模块的消息与模型执行。 */
+/** 会话控制器只提供元数据，不提前实现持久化对话的消息与模型执行。 */
 import {
   Body,
   Controller,
@@ -12,28 +12,28 @@ import {
   Query,
   Req,
   UseGuards,
-} from "@nestjs/common";
+} from '@nestjs/common';
 /** 文档注明所有会话操作均要求当前有效身份。 */
-import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 /** 使用类型安全条件组合实现归属及游标分页。 */
-import { and, desc, eq, lt, or } from "drizzle-orm";
+import { and, desc, eq, lt, or } from 'drizzle-orm';
 /** 共享元数据、输入及分页校验器。 */
 import {
   conversationSchema,
   conversationCreateSchema,
   conversationUpdateSchema,
   conversationQuerySchema,
-} from "@journey/contracts";
+} from '@journey/contracts';
 /** 请求边界统一使用schema管道。 */
-import { SchemaPipe } from "../../common/schema.pipe.js";
+import { SchemaPipe } from '../../common/schema.pipe.js';
 /** 数据库由应用基础设施提供。 */
-import { StorageService } from "../../storage/storage.module.js";
+import { StorageService } from '../../storage/storage.module.js';
 /** 会话与审计在事务中一同更新。 */
-import { conversations, auditEvents } from "../../storage/schema.js";
+import { conversations, auditEvents } from '../../storage/schema.js';
 /** 复用身份模块的可信访问守卫。 */
-import { IdentityModule } from "../identity/identity.module.js";
+import { IdentityModule } from '../identity/identity.module.js';
 /** 只读取守卫写入的actor，不允许客户端声明所有者。 */
-import { AccessGuard, type AuthRequest } from "../identity/auth.guards.js";
+import { AccessGuard, type AuthRequest } from '../identity/auth.guards.js';
 /** 公开序列化不返回userId，时间统一ISO字符串。 */
 function publicConversation(item: typeof conversations.$inferSelect) {
   return conversationSchema.parse({
@@ -45,13 +45,13 @@ function publicConversation(item: typeof conversations.$inferSelect) {
   });
 }
 /** 会话路由在文档中独立成组。 */
-@ApiTags("持久化会话")
+@ApiTags('持久化会话')
 /** 所有会话接口使用短期Bearer访问身份。 */
 @ApiBearerAuth()
 /** 类级守卫防止新增路由时遗漏认证。 */
 @UseGuards(AccessGuard)
 /** 路径只包含资源ID，不包含可伪造的userId。 */
-@Controller("conversations")
+@Controller('conversations')
 /** 数据归属在每个ORM查询条件中明确表达。 */
 export class ConversationsController {
   /** 注入真实存储服务。 */
@@ -67,7 +67,7 @@ export class ConversationsController {
     /** 固定的归属条件不能被可选查询字段覆盖。 */
     const owner = and(
       eq(conversations.userId, request.actor.userId),
-      eq(conversations.archived, query.archived === "true"),
+      eq(conversations.archived, query.archived === 'true'),
     );
     /** 缺省不限制游标；如提供则查找当前用户自己的起点。 */
     let position;
@@ -78,13 +78,10 @@ export class ConversationsController {
         .from(conversations)
         .where(and(owner, eq(conversations.id, query.cursor)))
         .limit(1);
-      if (!cursor) throw new NotFoundException("会话不存在");
+      if (!cursor) throw new NotFoundException('会话不存在');
       position = or(
         lt(conversations.createdAt, cursor.createdAt),
-        and(
-          eq(conversations.createdAt, cursor.createdAt),
-          lt(conversations.id, cursor.id),
-        ),
+        and(eq(conversations.createdAt, cursor.createdAt), lt(conversations.id, cursor.id)),
       );
     }
     /** 多取一条判断是否有下一页，不暴露其他用户的会话总数。 */
@@ -115,43 +112,33 @@ export class ConversationsController {
         .insert(conversations)
         .values({ userId: request.actor.userId, title: input.title })
         .returning();
-      if (!item) throw new Error("会话创建失败");
-      await tx
-        .insert(auditEvents)
-        .values({
-          userId: request.actor.userId,
-          action: "conversation.created",
-          targetId: item.id,
-        });
+      if (!item) throw new Error('会话创建失败');
+      await tx.insert(auditEvents).values({
+        userId: request.actor.userId,
+        action: 'conversation.created',
+        targetId: item.id,
+      });
       return publicConversation(item);
     });
   }
   /** 查询单会话不会因为知道UUID而绕过归属。 */
-  @Get(":id")
+  @Get(':id')
   /** 参数UUID必须在进入SQL之前通过验证。 */
-  async get(
-    @Req() request: AuthRequest,
-    @Param("id", new ParseUUIDPipe()) id: string,
-  ) {
+  async get(@Req() request: AuthRequest, @Param('id', new ParseUUIDPipe()) id: string) {
     const [item] = await this.storage.db
       .select()
       .from(conversations)
-      .where(
-        and(
-          eq(conversations.id, id),
-          eq(conversations.userId, request.actor.userId),
-        ),
-      )
+      .where(and(eq(conversations.id, id), eq(conversations.userId, request.actor.userId)))
       .limit(1);
-    if (!item) throw new NotFoundException("会话不存在");
+    if (!item) throw new NotFoundException('会话不存在');
     return publicConversation(item);
   }
   /** 更新只支持标题与可恢复归档。 */
-  @Patch(":id")
+  @Patch(':id')
   /** 原子更新条件同时包含资源和用户，拒绝先查询后无归属更新的漏洞。 */
   async update(
     @Req() request: AuthRequest,
-    @Param("id", new ParseUUIDPipe()) id: string,
+    @Param('id', new ParseUUIDPipe()) id: string,
     @Body(new SchemaPipe(conversationUpdateSchema))
     input: ReturnType<typeof conversationUpdateSchema.parse>,
   ) {
@@ -159,24 +146,14 @@ export class ConversationsController {
       const [item] = await tx
         .update(conversations)
         .set({ ...input, updatedAt: new Date() })
-        .where(
-          and(
-            eq(conversations.id, id),
-            eq(conversations.userId, request.actor.userId),
-          ),
-        )
+        .where(and(eq(conversations.id, id), eq(conversations.userId, request.actor.userId)))
         .returning();
-      if (!item) throw new NotFoundException("会话不存在");
-      await tx
-        .insert(auditEvents)
-        .values({
-          userId: request.actor.userId,
-          action:
-            input.archived === true
-              ? "conversation.archived"
-              : "conversation.updated",
-          targetId: id,
-        });
+      if (!item) throw new NotFoundException('会话不存在');
+      await tx.insert(auditEvents).values({
+        userId: request.actor.userId,
+        action: input.archived === true ? 'conversation.archived' : 'conversation.updated',
+        targetId: id,
+      });
       return publicConversation(item);
     });
   }

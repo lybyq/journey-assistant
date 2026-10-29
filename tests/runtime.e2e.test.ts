@@ -1,3 +1,7 @@
+/** 围栏与接管直接使用真实仓储和测试数据库，不能用内存mock代替行锁。 */
+import { RuntimeRepository } from '../apps/api/dist/modules/realtime/runtime.repository.js';
+import type { StorageService } from '../apps/api/src/storage/storage.module.js';
+import type { AppConfig } from '../apps/api/src/config/config.module.js';
 /** 持久化对话测试使用真实且独立的PostgreSQL数据库，不污染开发数据。 */
 import { Pool } from 'pg';
 /** HTTP模型fixture只监听本机，不消耗真实供应商额度。 */
@@ -332,7 +336,7 @@ describe('持久化对话持久化运行验收', () => {
         [id],
       );
       expect(
-        rows.rows.every((row) => row.executor === 'agent' && row.prompt_version === 'journey-v2.2'),
+        rows.rows.every((row) => row.executor === 'agent' && row.prompt_version === 'journey-v2.3'),
       ).toBe(true);
       expect(
         (
@@ -377,6 +381,207 @@ describe('持久化对话持久化运行验收', () => {
     conversationId = (await response.json()).id;
     expect((await snapshot()).items).toEqual([]);
   });
+  /** 真实模型SSE等待超过旧15秒租约后杀进程，重启应继续同一轮并且不重放已完成配置工具。 */
+  it('模型等待和硬重启后自动完成同一轮，工具不会重复执行', async () => {
+    const seen: Record<string, any>[] = [];
+    const fixture = createServer(async (req, res) => {
+      let raw = '';
+      for await (const part of req) raw += String(part);
+      seen.push(JSON.parse(raw));
+      /** 第二次模型请求保持真实网络等待，直到旧API进程被终止。 */
+      if (seen.length === 2) return;
+      const delta =
+        seen.length === 1
+          ? {
+              role: 'assistant',
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'recovery_plan_once',
+                  type: 'function',
+                  function: {
+                    name: 'journey_capabilities',
+                    arguments: JSON.stringify({}),
+                  },
+                },
+              ],
+            }
+          : seen.length === 3
+            ? {
+                role: 'assistant',
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'invalid-read-fields',
+                    type: 'function',
+                    function: {
+                      name: 'journey_trip_read',
+                      arguments: JSON.stringify({ section: 'not-a-section' }),
+                    },
+                  },
+                ],
+              }
+            : {
+                role: 'assistant',
+                content: '## 重启后继续完成\n\n已读取保存结果，未重复执行已完成工具。',
+              };
+      const frame = {
+        id: `recovery-fixture-${randomUUID()}`,
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'fixture-model',
+        choices: [{ index: 0, delta, finish_reason: null }],
+      };
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ' + JSON.stringify(frame) + '\n\n');
+      res.write(
+        'data: ' +
+          JSON.stringify({
+            ...frame,
+            choices: [
+              {
+                index: 0,
+                delta: {},
+                finish_reason: seen.length === 1 || seen.length === 3 ? 'tool_calls' : 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+          }) +
+          '\n\n',
+      );
+      res.end('data: [DONE]\n\n');
+    });
+    await new Promise<void>((resolve) => fixture.listen(0, '127.0.0.1', resolve));
+    const address = fixture.address();
+    if (!address || typeof address === 'string') throw new Error('恢复fixture启动失败');
+    const id = (
+      await (
+        await request('/conversations', {
+          method: 'POST',
+          token: alice.accessToken,
+          body: { title: '模型硬重启验收' },
+        })
+      ).json()
+    ).id;
+    let runId = '';
+    try {
+      await stopServer();
+      executor = 'agent';
+      modelBase = 'http://127.0.0.1:' + address.port + '/v1';
+      await startServer();
+      runId = (await start('读取已有结果回答，不需要查询新的库存', randomUUID(), id)).id;
+      await waitFor(async () => {
+        const current = await snapshot(id);
+        if (current.run?.status === 'failed')
+          throw new Error(
+            JSON.stringify(
+              current.events.filter(
+                (event) => event.type === 'run.failed' || event.type === 'tool.failed',
+              ),
+            ),
+          );
+        return seen.length === 2;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 17000));
+      expect((await snapshot(id)).run?.status).toBe('running');
+      expect(
+        (
+          await db.query('SELECT lease_until>clock_timestamp() AS valid FROM runs WHERE id=$1', [
+            runId,
+          ])
+        ).rows[0].valid,
+      ).toBe(true);
+      await stopServer();
+      await db.query(
+        "UPDATE runs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
+        [runId],
+      );
+      await startServer();
+      await waitFor(async () => {
+        const current = await snapshot(id);
+        if (current.run?.status === 'failed')
+          throw new Error(
+            JSON.stringify({
+              requests: seen.length,
+              events: current.events.filter(
+                (event) => event.type === 'run.failed' || event.type === 'tool.failed',
+              ),
+            }),
+          );
+        return current.run?.status === 'completed';
+      }, 15000);
+      const saved = await snapshot(id);
+      expect(saved.items).toHaveLength(2);
+      expect(saved.items.at(-1)?.content).toContain('重启后继续完成');
+      expect(
+        saved.events.filter(
+          (event) => event.type === 'tool.started' && event.payload.name === 'journey_capabilities',
+        ),
+      ).toHaveLength(1);
+      expect(saved.events.filter((event) => event.type === 'run.completed')).toHaveLength(1);
+      expect(saved.events.some((event) => event.type === 'run.failed')).toBe(false);
+      expect(seen).toHaveLength(4);
+      expect(
+        saved.events.some(
+          (event) => event.type === 'tool.failed' && event.payload.code === 'TOOL_INVALID_INPUT',
+        ),
+      ).toBe(true);
+      expect(JSON.stringify(seen[2]?.tools)).not.toContain('journey_trip_update');
+      expect(
+        (await db.query('SELECT recovery_attempts FROM runs WHERE id=$1', [runId])).rows[0]
+          .recovery_attempts,
+      ).toBe(1);
+      /** 模拟最终正文分块发布途中退出，恢复只补发后缀，不再请求模型。 */
+      await stopServer();
+      const store = new RuntimeRepository(
+        { sql: db } as any,
+        { env: { CHAT_EXECUTOR: 'agent' } } as any,
+      );
+      const sessionId = (
+        await db.query(
+          'SELECT id FROM refresh_sessions WHERE user_id=$1 AND revoked_at IS NULL LIMIT 1',
+          [alice.user.id],
+        )
+      ).rows[0].id;
+      const deliveryId = (
+        await db.query('INSERT INTO conversations(user_id,title) VALUES($1,$2) RETURNING id', [
+          alice.user.id,
+          '正文后缀验收',
+        ])
+      ).rows[0].id;
+      runId = (
+        await store.start({ userId: alice.user.id, sessionId } as any, deliveryId, {
+          requestId: randomUUID(),
+          message: '正文断点验收',
+        })
+      ).run.id;
+      const answer = '## 正文断点交付\n\n' + '中文与emoji 🧭 完整保留。'.repeat(50);
+      expect(await store.stageAnswer(runId, answer)).toBe(true);
+      const prefix = Array.from(answer).slice(0, 256).join('');
+      await store.append(runId, 'message.delta', { content: prefix });
+      await store.release(runId);
+      await startServer();
+      await waitFor(async () => (await snapshot(deliveryId)).run?.status === 'completed');
+      expect((await snapshot(deliveryId)).items.at(-1)?.content).toBe(answer);
+      expect(seen).toHaveLength(4);
+    } finally {
+      if (runId)
+        await db.query("UPDATE runs SET cancel_requested=true WHERE id=$1 AND status='running'", [
+          runId,
+        ]);
+      await stopServer();
+      executor = 'diagnostic';
+      modelBase = '';
+      await startServer();
+      if (runId)
+        await db.query(
+          "UPDATE runs SET status='cancelled',finished_at=now() WHERE id=$1 AND status='running'",
+          [runId],
+        );
+      fixture.closeAllConnections();
+      await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    }
+  }, 80000);
   /** HTTP、历史、流和取消都要求当前有效用户且不能越权。 */
   it('拒绝匿名、跨用户、伪造字段与未来游标', async () => {
     expect((await request(`/conversations/${conversationId}/messages`)).status).toBe(401);
@@ -582,17 +787,107 @@ describe('持久化对话持久化运行验收', () => {
     });
   });
   /** 模拟执行进程真正终止，重启后租约恢复器不能冒充成功重跑工具。 */
-  it('进程中断后恢复唯一失败终态，已完成历史仍可读取', async () => {
+  it('进程中断后自动接管同一运行，已完成历史仍可读取', async () => {
     const run = await start('进程中断验收');
     await stopServer();
     await db.query("UPDATE runs SET lease_until=now()-interval '1 second' WHERE id=$1", [run.id]);
     await startServer();
-    await waitFor(async () => (await snapshot()).run?.status === 'failed');
+    await waitFor(async () => (await snapshot()).run?.status === 'completed');
     const saved = await snapshot();
     expect(saved.items).toHaveLength(6);
-    expect(saved.events.filter((event) => event.type === 'run.failed')).toHaveLength(1);
-    expect(saved.events.some((event) => event.type === 'run.completed')).toBe(false);
-    expect((await db.query('SELECT name FROM journey_migrations')).rows).toHaveLength(4);
+    expect(saved.events.filter((event) => event.type === 'run.failed')).toHaveLength(0);
+    expect(saved.events.filter((event) => event.type === 'run.completed')).toHaveLength(1);
+    expect(
+      (await db.query('SELECT recovery_attempts FROM runs WHERE id=$1', [run.id])).rows[0]
+        .recovery_attempts,
+    ).toBe(1);
+    expect((await db.query('SELECT name FROM journey_migrations')).rows).toHaveLength(6);
+  }, 20000);
+  /** 两个独立仓储身份竞争时只能一个取得租约，旧身份不能追加任何消息或终态。 */
+  it('接管原子化、旧进程围栏和恢复次数上限', async () => {
+    const storage = { sql: db } as StorageService;
+    const config = { env: { CHAT_EXECUTOR: 'agent' } } as AppConfig;
+    const first = new RuntimeRepository(storage as any, config as any);
+    const second = new RuntimeRepository(storage as any, config as any);
+    const third = new RuntimeRepository(storage as any, config as any);
+    const sessionId = (
+      await db.query(
+        'SELECT id FROM refresh_sessions WHERE user_id=$1 AND revoked_at IS NULL LIMIT 1',
+        [alice.user.id],
+      )
+    ).rows[0].id;
+    const id = (
+      await db.query('INSERT INTO conversations(user_id,title) VALUES($1,$2) RETURNING id', [
+        alice.user.id,
+        '接管围栏验收',
+      ])
+    ).rows[0].id;
+    const created = await first.start({ userId: alice.user.id, sessionId } as any, id, {
+      requestId: randomUUID(),
+      message: '围栏验收',
+    });
+    const runId = created.run.id;
+    await first.append(runId, 'agent.step', {
+      module: 4,
+      stage: 'model.completed',
+      name: '主代理',
+      modelCalls: 4,
+      toolCalls: 18,
+      totalTokens: 40000,
+      estimated: true,
+    });
+    /** 超过恢复轨迹窗口，历史使用量仍必须保留。 */
+    for (let index = 0; index < 16; index++) {
+      const callId = randomUUID();
+      await first.append(runId, 'tool.started', { callId, name: 'journey_trip_read', input: {} });
+      await first.append(runId, 'tool.completed', {
+        callId,
+        name: 'journey_trip_read',
+        output: {
+          kind: 'internal',
+          data: { fixture: true },
+          truncated: false,
+          untrusted: false,
+          checkedAt: new Date().toISOString(),
+        },
+        durationMs: 0,
+      });
+    }
+    await stopServer();
+    try {
+      /** 未过期不能接管，即使另一进程正在扫描。 */
+      expect(await second.claimExpired(runId)).toBe(false);
+      await db.query(
+        "UPDATE runs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
+        [runId],
+      );
+      const claims = await Promise.all([second.claimExpired(runId), third.claimExpired(runId)]);
+      expect(claims.filter(Boolean)).toHaveLength(1);
+      const winner = claims[0] ? second : third;
+      expect(await first.renew(runId)).toBe(false);
+      expect(await first.append(runId, 'message.delta', { content: '迟到污染' })).toBe(false);
+      expect(await first.append(runId, 'run.failed', { code: 'LATE', message: '迟到失败' })).toBe(
+        false,
+      );
+      expect(await winner.renew(runId)).toBe(true);
+      expect((await winner.agentInput(runId)).recovery).toMatchObject({
+        modelCalls: 4,
+        toolCalls: 18,
+        totalTokens: 40000,
+        estimated: true,
+      });
+      /** 释放后可再接管一次；第三次接管明确终止，防止无限消费模型额度。 */
+      await winner.release(runId);
+      expect(await first.claimExpired(runId)).toBe(true);
+      await first.release(runId);
+      expect(await second.claimExpired(runId)).toBe(false);
+      const saved = await first.snapshot(alice.user.id, id, undefined, 10);
+      expect(saved.run?.status).toBe('failed');
+      expect(saved.events.filter((event) => event.type === 'run.failed')).toHaveLength(1);
+      expect(saved.items.find((item) => item.role === 'assistant')?.content).toBe('');
+    } finally {
+      await startServer();
+    }
   }, 20000);
   /** 退出后流连接会关闭，已发出的JWT也不能继续读取历史。 */
   it('登出撤销长连接和活动任务', async () => {

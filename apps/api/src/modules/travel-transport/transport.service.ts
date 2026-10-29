@@ -58,24 +58,28 @@ export class TransportService {
     const today = shanghaiDate();
     if (input.date < today || input.date > addDays(today, 14))
       throw new BadRequestException('仅查询今天起15天内的铁路车票；具体起售时间以12306为准');
-    /** 城市名优先查询代表站，失败再按具体站名解析，不能自行编造电报码。 */
+    /** 城市范围与指定车站分开解析，带“站”的名称强制采用车站编码。 */
     const call = await this.mcp.session(signal);
+    const originName = input.origin.replace(/站$/, '');
+    const destinationName = input.destination.replace(/站$/, '');
     const cities = asRecord(
-      await call('train__get_station_code_of_citys', {
-        citys: `${input.origin}|${input.destination}`,
-      }),
+      await call('train__get_station_code_of_citys', { citys: originName + '|' + destinationName }),
     );
-    let stations: Record<string, any> = {};
-    if (!this.code(cities[input.origin]) || !this.code(cities[input.destination]))
-      stations = asRecord(
-        await call('train__get_station_code_by_names', {
-          stationNames: `${input.origin}|${input.destination}`,
-        }),
-      );
-    const from = this.code(cities[input.origin]) ?? this.code(stations[input.origin]);
-    const to = this.code(cities[input.destination]) ?? this.code(stations[input.destination]);
+    const exactOrigin = input.origin.endsWith('站') || !this.code(cities[originName]);
+    const exactDestination =
+      input.destination.endsWith('站') || !this.code(cities[destinationName]);
+    const stations =
+      exactOrigin || exactDestination
+        ? asRecord(
+            await call('train__get_station_code_by_names', {
+              stationNames: originName + '|' + destinationName,
+            }),
+          )
+        : {};
+    const from = this.code(exactOrigin ? stations[originName] : cities[originName]);
+    const to = this.code(exactDestination ? stations[destinationName] : cities[destinationName]);
     if (!from || !to) throw new BadRequestException('无法确定出发或到达站，请填写具体中文车站名');
-    /** 最多四个候选，防止工具大输出被截断后误认为完整全部车次。 */
+    /** 12306可能返回同城替代站；扩大有界样本后按真实电报码过滤，绝不能把金山北当作虹桥。 */
     const raw = await call(
       input.interline ? 'train__get_interline_tickets' : 'train__get_tickets',
       {
@@ -83,19 +87,40 @@ export class TransportService {
         fromStation: from,
         toStation: to,
         format: 'json',
-        limitedNum: 4,
+        limitedNum: exactOrigin || exactDestination ? 40 : 4,
         sortFlag: 'duration',
       },
     );
-    const tickets = asRecords(raw);
+    const records = asRecords(raw);
+    const tickets = input.interline
+      ? records
+      : records.filter(
+          (ticket) =>
+            (!exactOrigin ||
+              (ticket.from_station_telecode
+                ? ticket.from_station_telecode === from
+                : String(ticket.from_station ?? '').replace(/站$/, '') === originName)) &&
+            (!exactDestination ||
+              (ticket.to_station_telecode
+                ? ticket.to_station_telecode === to
+                : String(ticket.to_station ?? '').replace(/站$/, '') === destinationName)),
+        );
     if (!tickets.length)
-      throw new BadRequestException('本次未获得结构化可用车次；可能无车次、尚未起售或供应商失败');
+      throw new BadRequestException(
+        records.length
+          ? '供应商返回候选与指定车站不匹配，已排除同城替代站；请调整时间范围或确认其他车站。'
+          : '本次查询未返回匹配车次，请核对日期、站点和起售时间。',
+      );
     const request = workspace.document.request;
     const now = new Date().toISOString();
     /** 每个席别单独形成选项，不把不同席别票价合并成一个虚构最低价。 */
-    const options: TransportOption[] = tickets.slice(0, 4).flatMap((ticket) => {
+    const options: TransportOption[] = tickets.slice(0, 3).flatMap((ticket) => {
       const legs = asRecords(ticket.ticketList);
-      const prices = input.interline ? [] : asRecords(ticket.prices).slice(0, 3);
+      const prices = input.interline
+        ? []
+        : asRecords(ticket.prices)
+            .sort((a, b) => Number(b.seat_name === '二等座') - Number(a.seat_name === '二等座'))
+            .slice(0, 2);
       const variants = prices.length ? prices : [null];
       return variants.map((price) => {
         const optionId = randomUUID();
@@ -161,8 +186,31 @@ export class TransportService {
       });
     });
     return this.repository.mutate(userId, id, revision, (document) => {
-      document.transport.push(...options);
-      document.costs.push(...options.flatMap((option) => (option.quote ? [option.quote] : [])));
+      /** 相同日期、车次、站点、席别的重复查询更新未选择候选，保留已引用ID并避免撑满容量。 */
+      for (const option of options) {
+        const existing = document.transport.find(
+          (old) =>
+            old.mode === option.mode &&
+            old.label === option.label &&
+            old.origin === option.origin &&
+            old.destination === option.destination &&
+            old.departure === option.departure &&
+            old.seatType === option.seatType,
+        );
+        if (existing) {
+          /** 已被预算选择的报价保留原始价格依据，不被一次刷新悄悄改价。 */
+          if (existing.quote?.selected) continue;
+          option.id = existing.id;
+          if (existing.quote && option.quote) {
+            option.quote.id = existing.quote.id;
+            option.quote.scopeKey = existing.quote.scopeKey;
+          }
+          document.transport[document.transport.indexOf(existing)] = option;
+          if (existing.quote)
+            document.costs = document.costs.filter((cost) => cost.id !== existing.quote!.id);
+        } else document.transport.push(option);
+        if (option.quote) document.costs.push(option.quote);
+      }
       return document;
     });
   }

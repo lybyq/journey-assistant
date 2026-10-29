@@ -165,7 +165,7 @@ describe('身份与存储真实数据验收', () => {
     const response = await request('/system/storage');
     expect(await response.json()).toEqual({ enabled: true, postgres: 'ready', redis: 'ready' });
     const rows = await db.query('SELECT name FROM journey_migrations');
-    expect(rows.rows).toHaveLength(4);
+    expect(rows.rows).toHaveLength(6);
   });
   /** 仅已发布的精确旧摘要可兼容；未知摘要仍使启动失败，账本不会被静默改写。 */
   it.each([
@@ -366,7 +366,7 @@ describe('身份与存储真实数据验收', () => {
         ).json()
       ).title,
     ).toBe('已改名旅行');
-    expect((await db.query('SELECT name FROM journey_migrations')).rows).toHaveLength(4);
+    expect((await db.query('SELECT name FROM journey_migrations')).rows).toHaveLength(6);
   }, 20000);
   /** 每次刷新改变Cookie；旧秘密重放后新旧访问JWT都必须失效。 */
   it('刷新轮换并检测重放，撤销事务不会回滚', async () => {

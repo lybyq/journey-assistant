@@ -31,6 +31,12 @@ import type { AgentInput } from '../agent/execution.types.js';
 import { AGENT_PROMPT_VERSION } from '../agent/agent.prompt.js';
 /** 运行SQL结果包含内部租约字段，序列化时必须白名单取值。 */
 export interface RunRow {
+  /** 当前执行进程的围栏标识，只用于数据库状态裁决。 */
+  owner_id: string | null;
+  /** 执行模式属于运行快照，重启不能偷换成诊断输出。 */
+  executor: 'agent' | 'diagnostic';
+  /** 已经发生的自动恢复次数。 */
+  recovery_attempts: number;
   id: string;
   request_id: string;
   user_id: string;
@@ -57,6 +63,8 @@ export function publicRun(row: RunRow): PersistedRun {
 @Injectable()
 /** SQL全部使用参数绑定，原文不写日志。 */
 export class RuntimeRepository {
+  /** 每次进程启动更换身份，数据库接管后拒绝旧执行器迟到写入。 */
+  private readonly ownerId = randomUUID();
   /** 持有应用唯一存储服务。 */
   constructor(
     private readonly storage: StorageService,
@@ -136,8 +144,15 @@ export class RuntimeRepository {
         throw new HttpException('运行配额已满，请等待或停止当前任务', 429);
       /** 租约超时后由恢复器写入明确失败终态。 */
       const inserted = await client.query<RunRow>(
-        "INSERT INTO runs(id,request_id,user_id,session_id,conversation_id,lease_until) VALUES($1,$2,$3,$4,$5,now()+interval '15 seconds') RETURNING *",
-        [randomUUID(), input.requestId, actor.userId, actor.sessionId, conversationId],
+        "INSERT INTO runs(id,request_id,user_id,session_id,conversation_id,owner_id,lease_until) VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()+interval '30 seconds') RETURNING *",
+        [
+          randomUUID(),
+          input.requestId,
+          actor.userId,
+          actor.sessionId,
+          conversationId,
+          this.ownerId,
+        ],
       );
       /** 数据库保证INSERT返回一行。 */
       const row = inserted.rows[0]!;
@@ -242,12 +257,7 @@ export class RuntimeRepository {
     /** 结束原子追加。 */
   }
   /** 任意执行器追加前重新检查数据库终态。 */
-  async append(
-    runId: string,
-    type: ServerEvent['type'],
-    payload: unknown,
-    expiredOnly = false,
-  ): Promise<boolean> {
+  async append(runId: string, type: ServerEvent['type'], payload: unknown): Promise<boolean> {
     /** 先读取不可变归属，然后以统一顺序锁定。 */
     return this.transaction(async (client) => {
       /** 运行删除时不产生新事件。 */
@@ -263,8 +273,8 @@ export class RuntimeRepository {
         runId,
       ]);
       const run = result.rows[0]!;
-      /** 恢复器必须在锁内再次检查租约，防止误杀刚续租任务。 */
-      if (expiredOnly && run.lease_until.getTime() > Date.now()) return false;
+      /** 围栏检查在行锁内执行，已经被其他进程接管的执行器不能发布正文或终态。 */
+      if (run.owner_id !== this.ownerId) return false;
       /** 服务端已经收到取消后，不再发布新的增量或成功终态。 */
       if (run.cancel_requested && type !== 'run.cancelled' && type !== 'run.failed') return false;
       /** 统一实现状态机与事件一致性。 */
@@ -361,17 +371,84 @@ export class RuntimeRepository {
   /** 续租同时检查登录会话是否撤销，登出后任务也停止。 */
   async renew(runId: string): Promise<boolean> {
     const result = await this.storage.sql.query(
-      "UPDATE runs r SET lease_until=now()+interval '15 seconds' FROM refresh_sessions s,users u WHERE r.id=$1 AND r.status='running' AND NOT r.cancel_requested AND s.id=r.session_id AND s.revoked_at IS NULL AND s.expires_at>now() AND u.id=r.user_id AND u.disabled_at IS NULL RETURNING r.id",
-      [runId],
+      "UPDATE runs r SET lease_until=clock_timestamp()+interval '30 seconds' FROM refresh_sessions s,users u WHERE r.id=$1 AND r.owner_id=$2 AND r.status='running' AND NOT r.cancel_requested AND s.id=r.session_id AND s.revoked_at IS NULL AND s.expires_at>now() AND u.id=r.user_id AND u.disabled_at IS NULL RETURNING r.id",
+      [runId, this.ownerId],
     );
     return Boolean(result.rowCount);
   }
   /** 查找过期任务时限制批次，恢复器不会一次读取全部历史。 */
   async expired(): Promise<string[]> {
     const result = await this.storage.sql.query(
-      "SELECT id FROM runs WHERE status='running' AND lease_until<now() LIMIT 40",
+      "SELECT id FROM runs WHERE status='running' AND lease_until<clock_timestamp() ORDER BY lease_until LIMIT 40",
     );
     return result.rows.map((row) => row.id as string);
+  }
+  /** 在统一锁顺序下接管真正过期的任务；数据库时钟避免应用与数据库时钟差误判。 */
+  async claimExpired(runId: string): Promise<boolean> {
+    return this.transaction(async (client) => {
+      const found = await client.query<RunRow>('SELECT * FROM runs WHERE id=$1', [runId]);
+      const initial = found.rows[0];
+      if (!initial) return false;
+      await client.query('SELECT id FROM conversations WHERE id=$1 FOR UPDATE', [
+        initial.conversation_id,
+      ]);
+      const locked = await client.query<RunRow>(
+        "SELECT * FROM runs WHERE id=$1 AND status='running' AND lease_until<clock_timestamp() FOR UPDATE",
+        [runId],
+      );
+      const run = locked.rows[0];
+      if (!run) return false;
+      /** 取得锁之后再用数据库实时钟重查，不能使用事务开始时间或Node时钟。 */
+      const expired = await client.query(
+        'SELECT lease_until<clock_timestamp() AS expired FROM runs WHERE id=$1',
+        [runId],
+      );
+      if (!expired.rows[0]?.expired) return false;
+      const session = await client.query(
+        'SELECT s.id FROM refresh_sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND u.disabled_at IS NULL',
+        [run.session_id],
+      );
+      if (run.cancel_requested || !session.rowCount) {
+        await this.appendLocked(client, run, 'run.cancelled', {
+          message: '运行已停止，已保存结果仍可查看。',
+        });
+        return false;
+      }
+      if (run.executor !== this.config.env.CHAT_EXECUTOR) {
+        await this.appendLocked(client, run, 'run.failed', {
+          code: 'EXECUTOR_CHANGED',
+          message: '服务执行模式已更改，本轮没有重放；已保存资料仍可查看。',
+        });
+        return false;
+      }
+      if (run.recovery_attempts >= 2) {
+        await this.appendLocked(client, run, 'run.failed', {
+          code: 'RECOVERY_LIMIT',
+          message: '服务连续中断，自动恢复已达上限；已保存资料仍可查看，请检查服务运行状态。',
+        });
+        return false;
+      }
+      await client.query(
+        "UPDATE runs SET owner_id=$2,recovery_attempts=recovery_attempts+1,lease_until=clock_timestamp()+interval '30 seconds' WHERE id=$1",
+        [runId, this.ownerId],
+      );
+      return true;
+    });
+  }
+  /** 正文在第一个增量之前落库，进程在发布中途退出也能按精确前缀继续。 */
+  async stageAnswer(runId: string, answer: string): Promise<boolean> {
+    const saved = await this.storage.sql.query(
+      "UPDATE runs SET final_answer=$3 WHERE id=$1 AND owner_id=$2 AND status='running' AND NOT cancel_requested AND (final_answer IS NULL OR final_answer=$3) RETURNING id",
+      [runId, this.ownerId, answer],
+    );
+    return Boolean(saved.rowCount);
+  }
+  /** 优雅停服保留运行，下一进程可以立即接管；不会把维护重启当作业务失败。 */
+  async release(runId: string): Promise<void> {
+    await this.storage.sql.query(
+      "UPDATE runs SET owner_id=NULL,lease_until=clock_timestamp() WHERE id=$1 AND owner_id=$2 AND status='running'",
+      [runId, this.ownerId],
+    );
   }
   /** 从数据库生成可信上下文；客户端不能注入别人的历史或system角色。 */
   async agentInput(runId: string): Promise<AgentInput> {
@@ -413,6 +490,21 @@ export class RuntimeRepository {
       userId: run.user_id,
       conversationId: run.conversation_id,
       messages,
+      ...(run.final_answer
+        ? {
+            delivery: {
+              answer: run.final_answer as string,
+              published:
+                (
+                  await this.storage.sql.query(
+                    "SELECT content FROM messages WHERE run_id=$1 AND role='assistant'",
+                    [runId],
+                  )
+                ).rows[0]?.content ?? '',
+            },
+          }
+        : {}),
+      ...(run.recovery_attempts > 0 ? { recovery: await this.recoveryContext(runId) } : {}),
       profile: {
         homeCity: value?.home_city ?? '',
         preferredMode: value?.preferred_mode ?? 'independent',
@@ -420,6 +512,61 @@ export class RuntimeRepository {
       },
     };
     /** 结束可信历史装配。 */
+  }
+  /** 只在恢复轮收尾丢失响应的调用；使用原callId，界面不会一直显示执行中。 */
+  async settleInterruptedTools(runId: string): Promise<void> {
+    const run = await this.storage.sql.query(
+      'SELECT recovery_attempts FROM runs WHERE id=$1 AND owner_id=$2',
+      [runId, this.ownerId],
+    );
+    if (!run.rows[0]?.recovery_attempts) return;
+    const results = await this.storage.sql.query(
+      "SELECT event FROM run_events WHERE run_id=$1 AND event->>'type' IN ('tool.started','tool.completed','tool.failed') ORDER BY sequence",
+      [runId],
+    );
+    const pending = new Map<string, { name: string }>();
+    for (const { event } of results.rows) {
+      if (event.type === 'tool.started') pending.set(event.payload.callId, event.payload);
+      else pending.delete(event.payload.callId);
+    }
+    for (const [callId, call] of pending)
+      await this.append(runId, 'tool.failed', {
+        callId,
+        name: call.name,
+        code: 'SERVICE_RESTARTED',
+        message: '服务重启，此次调用结果尚未确认；已保存业务资料会继续使用，不会自动重复提交。',
+        durationMs: 0,
+      });
+  }
+  /** 恢复只整理已经保存的工具事实，不重放可能已经提交的业务写操作。 */
+  private async recoveryContext(runId: string) {
+    const events = await this.storage.sql.query(
+      "SELECT event FROM run_events WHERE run_id=$1 AND event->>'type' IN ('tool.completed','tool.failed','agent.step') ORDER BY sequence DESC LIMIT 24",
+      [runId],
+    );
+    /** 使用量独立查询，避免并行工具超过24条时把历史计数挤出窗口而重置预算。 */
+    const [latestUsage, delegations] = await Promise.all([
+      this.storage.sql.query(
+        "SELECT event->'payload' AS usage FROM run_events WHERE run_id=$1 AND event->>'type'='agent.step' ORDER BY sequence DESC LIMIT 1",
+        [runId],
+      ),
+      this.storage.sql.query(
+        "SELECT count(*)::int AS total FROM run_events WHERE run_id=$1 AND event->>'type'='agent.step' AND event->'payload'->>'stage'='subagent.started'",
+        [runId],
+      ),
+    ]);
+    const usage = latestUsage.rows[0]?.usage;
+    return {
+      toolResults: events.rows
+        .filter((row) => row.event.type !== 'agent.step')
+        .reverse()
+        .map((row) => row.event.payload),
+      modelCalls: usage?.modelCalls ?? 0,
+      toolCalls: usage?.toolCalls ?? 0,
+      totalTokens: usage?.totalTokens ?? 0,
+      estimated: Boolean(usage?.estimated),
+      subagents: delegations.rows[0]?.total ?? 0,
+    };
   }
   /** 结束运行仓储。 */
 }

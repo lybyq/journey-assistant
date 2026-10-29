@@ -1,5 +1,7 @@
+/** SDK参数异常只公开经脱敏的字段校验说明，不能误报为供应商网络故障。 */
+import { ToolInputParsingException } from '@langchain/core/tools';
 /** 真实SDK中间件包住每一次模型与工具调用。 */
-import { createMiddleware } from 'langchain';
+import { createMiddleware, ToolInvocationError } from 'langchain';
 /** 工具输出重建为安全ToolMessage，避免原始返回值进入下一轮模型。 */
 import { ToolMessage, HumanMessage } from '@langchain/core/messages';
 /** 动态输出额度通过真实模型实例配置，不能只传SDK会忽略的调用参数。 */
@@ -39,6 +41,10 @@ export interface RunBudget {
   estimated: boolean;
   /** 最近一次输入用量用于预留收束回答，实际累计仍包括全部供应商计费token。 */
   lastInputTokens?: number;
+  /** 单调时钟的查询截止点，提前于整轮硬超时。 */
+  queryDeadline?: number;
+  /** 主子代理共享一次阶段结束提示，避免并行取消重复刷屏。 */
+  queryLimitNotified?: boolean;
 }
 /** 每轮新建中间件闭包，不能把不同用户的计数混在一起。 */
 export function executionMiddleware(
@@ -52,6 +58,10 @@ export function executionMiddleware(
   toolVisible: (name: string) => boolean = () => true,
   /** OpenAI兼容SDK从构造参数maxTokens读取上限，每次真实请求明确设置。 */
   modelForLimit?: (maxTokens: number) => BaseChatModel,
+  /** 已完成能力可以卸载大Schema，避免每次模型请求重复计费。 */
+  onToolCompleted?: (name: string) => void,
+  /** 查询阶段中止不能被误报为用户取消或供应商故障。 */
+  querySignal?: AbortSignal,
 ) {
   /** 模型阶段只发计数和名称，不发送prompt和隐藏推理。 */
   const step = (
@@ -102,6 +112,7 @@ export function executionMiddleware(
         /** 调用真实模型，重试由模型工厂明确限制。 */
         /** 在最后一次允许调用或剩余预算不足常规上下文时，先收束而非继续查工具。 */
         const finalize =
+          (budget.queryDeadline !== undefined && performance.now() >= budget.queryDeadline) ||
           budget.modelCalls === env.AGENT_MAX_MODEL_CALLS ||
           env.AGENT_MAX_TOKENS - budget.totalTokens <=
             Math.max(3000, (budget.lastInputTokens ?? 0) * 2 + env.AGENT_MAX_OUTPUT_TOKENS);
@@ -253,6 +264,15 @@ export function executionMiddleware(
       if (name === 'task') await step('subagent.started', '旅行研究子代理');
       /** 工具成功、失败都由同一关联ID收尾。 */
       try {
+        /** 临近硬超时停止新查询，留时间生成带有缺失说明的完整正文。 */
+        if (
+          budget.queryDeadline !== undefined &&
+          performance.now() >= budget.queryDeadline &&
+          !['journey_trip_read', 'journey_budget', 'journey_capabilities', 'write_todos'].includes(
+            name,
+          )
+        )
+          throw new McpToolError('QUERY_TIME_LIMIT', '查询阶段时间预算已到，正在整理已保存结果');
         /** 原样交给真实工具执行，确保写计划的Command生效。 */
         const result = await handler(request);
         signal.throwIfAborted();
@@ -265,7 +285,7 @@ export function executionMiddleware(
           await publish('run.plan', { module: 4, todos });
         }
         /** MCP包装已经返回信封；本地工具与子任务另做一次脱敏。 */
-        let output: ReturnType<ToolSafety['result']>;
+        let output: ReturnType<typeof safeToolResultSchema.parse>;
         const content =
           result instanceof ToolMessage
             ? result.content
@@ -285,6 +305,7 @@ export function executionMiddleware(
           output,
           durationMs: Math.max(0, performance.now() - started),
         });
+        onToolCompleted?.(name);
         if (name === 'task') await step('subagent.completed', '旅行研究子代理');
         /** 工具给模型的结果必须和网页展示一致；Command只用于实际计划状态。 */
         return result instanceof ToolMessage
@@ -300,18 +321,41 @@ export function executionMiddleware(
         if (signal.aborted) throw error;
         const controlled = findExecutionError(error);
         if (controlled) throw controlled;
-        const code =
-          error instanceof McpToolError
-            ? error.code
-            : error instanceof HttpException
-              ? `BUSINESS_HTTP_${error.getStatus()}`
-              : 'TOOL_EXECUTION_FAILED';
-        const message =
-          error instanceof McpToolError
-            ? error.message
-            : error instanceof HttpException
-              ? safety.text(error.message, 600)
-              : '工具执行失败，暂时没有可用结果';
+        /** SDK把输入错误放在toolError而非cause中，不能公开外层包含堆栈和原始参数的message。 */
+        const inputError =
+          error instanceof ToolInputParsingException
+            ? error
+            : ToolInvocationError.isInstance(error) &&
+                error.toolError instanceof ToolInputParsingException
+              ? error.toolError
+              : null;
+        const timeLimited = Boolean(querySignal?.aborted && !signal.aborted);
+        if (timeLimited && !budget.queryLimitNotified) {
+          budget.queryLimitNotified = true;
+          await publish('run.progress', {
+            title: '查询阶段结束，正在整理回答',
+            detail:
+              '已停止新增查询，使用已保存事实回答；未完成项会明确列出，不要求重新发送整轮问题。',
+          });
+        }
+        const code = timeLimited
+          ? 'QUERY_TIME_LIMIT'
+          : inputError
+            ? 'TOOL_INVALID_INPUT'
+            : error instanceof McpToolError
+              ? error.code
+              : error instanceof HttpException
+                ? `BUSINESS_HTTP_${error.getStatus()}`
+                : 'TOOL_EXECUTION_FAILED';
+        const message = timeLimited
+          ? '查询时间预算已到，已停止本次查询并保留已保存结果，正在生成最终回答。'
+          : inputError
+            ? `工具参数不符合定义，请修正字段后再调用：${safety.text(inputError.message, 1000)}`
+            : error instanceof McpToolError
+              ? error.message
+              : error instanceof HttpException
+                ? safety.text(error.message, 600)
+                : '工具执行失败，暂时没有可用结果';
         await publish('tool.failed', {
           callId,
           name,

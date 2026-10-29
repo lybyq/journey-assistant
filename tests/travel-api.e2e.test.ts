@@ -512,6 +512,6 @@ describe('旅行服务生产HTTP链路', () => {
     expect(metrics.windowHours).toBe(24);
     expect(metrics.operations.some((row: any) => row.status === 'failed')).toBe(true);
     const migrations = await db.query('SELECT name FROM journey_migrations');
-    expect(migrations.rows).toHaveLength(4);
+    expect(migrations.rows).toHaveLength(6);
   });
 });

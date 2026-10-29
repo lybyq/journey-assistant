@@ -346,6 +346,8 @@ beforeAll(async () => {
             arrive_time: '11:00',
             lishi: '02:00',
             from_station: '杭州',
+            from_station_telecode: 'HZH',
+            to_station_telecode: 'SZH',
             to_station: '苏州',
             prices: [{ seat_name: '二等座', price: 100.5, num: '有' }],
           },
@@ -572,6 +574,55 @@ describe('旅行服务供应商协议链路', () => {
       toStation: 'SZH',
       format: 'json',
     });
+  });
+  /** 连续查询相同车次刷新原候选，不能每次增加一份相同报价撑满容量。 */
+  it('相同铁路查询幂等更新，紧凑输出仍保留真实票价', async () => {
+    const before = trip.document.transport.length;
+    const original = trip.document.transport[0]!;
+    trip = await transport.rail(
+      owner,
+      trip.id,
+      trip.revision,
+      {
+        origin: '杭州',
+        destination: '苏州',
+        date: shanghaiDate(),
+        accessMinutes: 30,
+        bufferMinutes: 40,
+        egressMinutes: 20,
+        interline: false,
+      },
+      new AbortController().signal,
+    );
+    expect(trip.document.transport.length).toBe(before);
+    expect(trip.document.transport[0]?.id).toBe(original.id);
+    expect(trip.document.transport[0]?.quote?.id).toBe(original.quote?.id);
+    const { travelToolSummary } = await import('../apps/api/dist/modules/travel/tool-summary.js');
+    const envelope = mcp.safety.result(travelToolSummary(trip, 'transport'), 'internal');
+    expect(envelope.truncated).toBe(false);
+    expect((envelope.data as any).data[0].quote.unitAmountMinor).toBe(10050);
+  });
+  /** 同城替代站不能冒充用户指定车站，拒绝后不写入任何不匹配报价。 */
+  it('指定车站不接受同城替代站的候选', async () => {
+    const before = trip.revision;
+    await expect(
+      transport.rail(
+        owner,
+        trip.id,
+        trip.revision,
+        {
+          origin: '杭州东站',
+          destination: '苏州',
+          date: shanghaiDate(),
+          accessMinutes: 30,
+          bufferMinutes: 30,
+          egressMinutes: 30,
+          interline: false,
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('与指定车站不匹配');
+    expect((await repository.get(owner, trip.id)).revision).toBe(before);
   });
   /** 同一OAuth令牌缓存，回包币种以供应商实际字段为准。 */
   it('航班OAuth真实请求与实际币种保留', async () => {

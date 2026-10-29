@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "pnpm build && concurrently -k -n TSC,NODE \"tsc -p tsconfig.json --watch\" \"node --watch --watch-preserve-output dist/main.js\"",
+    "dev": "pnpm build && node dist/main.js",
     "start": "node dist/main.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev:watch": "pnpm build && concurrently -k -n TSC,NODE \"tsc -p tsconfig.json --watch\" \"node --watch --watch-preserve-output dist/main.js\""
   },
   "dependencies": {
     "12306-mcp": "0.3.10",

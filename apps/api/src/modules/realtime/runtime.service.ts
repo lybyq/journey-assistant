@@ -3,7 +3,13 @@ import { randomUUID } from 'node:crypto';
 /** 可取消等待用于流式节奏，不冒充工具耗时。 */
 import { setTimeout as delay } from 'node:timers/promises';
 /** 生命周期在停服时中止本进程所有工作。 */
-import { Injectable, Logger, type OnModuleInit, type OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+  type OnModuleInit,
+  type OnModuleDestroy,
+} from '@nestjs/common';
 /** 使用可信认证上下文创建运行。 */
 import type { Actor } from '../identity/auth.service.js';
 /** 真实健康工具复用现有实现。 */
@@ -41,9 +47,12 @@ export class RuntimeService implements OnModuleInit, OnModuleDestroy {
       void this.recover();
     }, 5000);
     this.recovery.unref();
+    void this.recover();
   }
   /** 幂等提交只有首次创建才启动工作，不会重复调用工具。 */
   async start(actor: Actor, conversationId: string, input: { requestId: string; message: string }) {
+    /** 停服期间明确拒绝新任务，避免提交后立即失去执行器。 */
+    if (this.closing) throw new ServiceUnavailableException('服务正在重启，请稍后重试');
     /** 数据库先提交运行，工作随后执行。 */
     const result = await this.repository.start(actor, conversationId, input);
     /** 一个运行只有创建它的进程执行，其他实例返回原运行。 */
@@ -69,16 +78,14 @@ export class RuntimeService implements OnModuleInit, OnModuleDestroy {
     this.recovering = true;
     /** 恢复失败留给下一次扫描，不打印数据库连接串。 */
     try {
-      for (const id of await this.repository.expired())
-        await this.repository.append(
-          id,
-          'run.failed',
-          {
-            code: 'WORKER_INTERRUPTED',
-            message: '执行进程中断；已保存内容可查看，请重新发送继续。',
-          },
-          true,
-        );
+      /** 活跃执行器在系统挂起恢复后先续租，避免本进程的扫描先于心跳误接管。 */
+      for (const id of this.active.keys()) await this.repository.renew(id);
+      for (const id of await this.repository.expired()) {
+        if (this.active.has(id) || !(await this.repository.claimExpired(id))) continue;
+        const controller = new AbortController();
+        this.active.set(id, controller);
+        void this.execute(id, controller);
+      }
     } catch {
       /** 无存储模式保持安静，其他故障也不产生未处理Promise。 */
       /* 存储就绪后下一次扫描继续恢复。 */
@@ -98,6 +105,8 @@ export class RuntimeService implements OnModuleInit, OnModuleDestroy {
     timeout.unref();
     /** 长模型/工具等待期间仍独立续租并检测取消，不依赖增量到达。 */
     let renewing = false;
+    /** 单次短暂数据库抖动允许下次心跳重试，持续故障仍在租约到期前停止执行。 */
+    let lastRenewed = performance.now();
     const heartbeat = setInterval(() => {
       if (renewing) return;
       renewing = true;
@@ -105,8 +114,11 @@ export class RuntimeService implements OnModuleInit, OnModuleDestroy {
         .renew(runId)
         .then((valid) => {
           if (!valid) controller.abort('cancelled');
+          else lastRenewed = performance.now();
         })
-        .catch(() => controller.abort('storage'))
+        .catch(() => {
+          if (performance.now() - lastRenewed > 20000) controller.abort('storage');
+        })
         .finally(() => {
           renewing = false;
         });
@@ -126,12 +138,20 @@ export class RuntimeService implements OnModuleInit, OnModuleDestroy {
     };
     /** 运行最终只有一个数据库终态，即使取消与完成同时发生。 */
     try {
+      /** 重启前未收尾的调用只标记结果未确认，不能冒充供应商无数据或成功。 */
+      await this.repository.settleInterruptedTools(runId);
       /** 默认执行真实智能体；诊断分支仅用于明确的本地测试。 */
       if (this.config.env.CHAT_EXECUTOR === 'agent') {
         await this.agent.execute(
           await this.repository.agentInput(runId),
           controller.signal,
           publish,
+          async (answer) => {
+            if (!(await this.repository.stageAnswer(runId, answer))) {
+              controller.abort('ownership');
+              controller.signal.throwIfAborted();
+            }
+          },
         );
         if (
           !(await this.repository.append(runId, 'run.completed', {
@@ -193,11 +213,18 @@ export class RuntimeService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       /** 超时明确为失败，用户取消和登出均停止实际执行。 */
       try {
+        /** 停服把租约交还；被接管的旧进程直接退出，不能写出错误终态。 */
+        if (controller.signal.reason === 'shutdown') {
+          await this.repository.release(runId);
+          return;
+        }
+        if (controller.signal.reason === 'ownership') return;
         if (
           controller.signal.aborted &&
           controller.signal.reason !== 'timeout' &&
           controller.signal.reason !== 'shutdown' &&
-          controller.signal.reason !== 'storage'
+          controller.signal.reason !== 'storage' &&
+          controller.signal.reason !== 'ownership'
         )
           await this.repository.append(runId, 'run.cancelled', {
             message: '运行已停止，已发送内容已保存。',

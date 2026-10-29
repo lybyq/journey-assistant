@@ -3,7 +3,7 @@ import { BadGatewayException, ServiceUnavailableException, Injectable } from '@n
 /** 统一结果信封继续经过共享结构校验。 */
 import { safeToolResultSchema } from '@journey/contracts';
 /** MCP工具中心拥有连接与输出清理，本模块不重复建立认证客户端。 */
-import { McpService } from '../mcp/mcp.service.js';
+import { McpService, McpToolError } from '../mcp/mcp.service.js';
 /** 领域层只接受这个固定集合，扩大权限需要改源码并重新审核。 */
 const BUSINESS_TOOLS = new Set([
   'tavily__tavily_search',
@@ -31,7 +31,7 @@ export class TravelMcpService {
   /** 先发现，再返回绑定该次取消信号与URL证据集合的调用闭包。 */
   async session(signal: AbortSignal) {
     await this.mcp.discover(signal);
-    const tools = this.mcp.tools(signal);
+    const tools = this.mcp.tools(signal, true);
     return async (name: string, args: Record<string, unknown>): Promise<unknown> => {
       /** 名称既要在业务固定集合内，也必须来自MCP工具中心的实际发现。 */
       signal.throwIfAborted();
@@ -48,6 +48,7 @@ export class TravelMcpService {
         return envelope.data;
       } catch (error) {
         if (signal.aborted) throw signal.reason;
+        if (error instanceof McpToolError) throw error;
         throw new BadGatewayException('供应商查询失败或参数不被支持，请核对条件后重试');
       }
     };

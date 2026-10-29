@@ -111,6 +111,25 @@ describe('旅行服务公开输出边界', () => {
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(8000);
     expect(result.truncated).toBe(true);
   });
+  /** 大结果不能再变成半截JSON，金额字段仍可直接读取。 */
+  it('大工具结果保留JSON结构与金额，业务通道避免提前截断', () => {
+    const safety = new ToolSafety([]);
+    const raw = Array.from({ length: 4 }, (_, index) => ({
+      train: 'G' + index,
+      priceMinor: 10050,
+      notes: '查询记录'.repeat(800),
+    }));
+    const publicResult = safety.result(raw);
+    expect(Array.isArray(publicResult.data)).toBe(true);
+    expect((publicResult.data as any[])[0].priceMinor).toBe(10050);
+    expect(publicResult.truncated).toBe(true);
+    const business = safety.result(raw, 'mcp', 128000);
+    expect(business.truncated).toBe(false);
+    expect(business.data).toEqual(raw);
+    expect(
+      safety.result({ url: 'https://example.org/?token=secret' }, 'mcp', 128000).truncated,
+    ).toBe(false);
+  });
   /** 私有或认证链接不能交给抽取工具。 */
   it('抽取只允许公共HTTP来源', () => {
     for (const url of [

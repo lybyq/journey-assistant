@@ -6,6 +6,17 @@ export type PublishEvent = (type: ServerEvent['type'], payload: unknown) => Prom
 export interface AgentInput {
   /** 这三个标识构成checkpoint隔离命名空间。 */
   runId: string;
+  /** 已经通过格式校验并落库的最终正文，重启只补发缺少的后缀，不再调用模型。 */
+  delivery?: { answer: string; published: string };
+  /** 服务重启后仅整理持久化事实，禁止自动重放未确认的业务写入。 */
+  recovery?: {
+    toolResults: unknown[];
+    modelCalls: number;
+    toolCalls: number;
+    totalTokens: number;
+    estimated: boolean;
+    subagents: number;
+  };
   /** 归属用户来自鉴权上下文与数据库，不能信任浏览器自报。 */
   userId: string;
   /** 当前会话已经由持久化对话校验归属。 */

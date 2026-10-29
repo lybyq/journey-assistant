@@ -228,7 +228,7 @@ export class McpService implements OnModuleDestroy {
     };
   }
   /** 每轮独立包装工具，所有实际调用必须通过schema、预算与输出边界。 */
-  tools(signal: AbortSignal): DynamicStructuredTool[] {
+  tools(signal: AbortSignal, business = false): DynamicStructuredTool[] {
     /** 抽取仅允许本轮搜索结果中的公共来源，不能任意读取本机或内网URL。 */
     const evidence = new Set<string>();
     /** 工具只来自刚刚发现并通过白名单的服务器。 */
@@ -318,8 +318,31 @@ export class McpService implements OnModuleDestroy {
                   ? parseText(texts[0])
                   : texts.map(parseText)
                 : parseText(texts);
+              /** 有些供应商把失败写在成功协议帧的文本或JSON中，仍必须作为失败呈现。 */
+              const record =
+                data && typeof data === 'object' && !Array.isArray(data)
+                  ? (data as Record<string, unknown>)
+                  : null;
+              if (
+                (typeof data === 'string' && /^(?:Error|错误|查询失败)\s*[:：]/i.test(data)) ||
+                record?.error ||
+                record?.status === '0' ||
+                record?.success === false
+              ) {
+                const detail =
+                  typeof data === 'string'
+                    ? data
+                    : String(record?.info ?? record?.message ?? '供应商返回业务拒绝');
+                throw new McpToolError('MCP_PROVIDER_REJECTED', this.safety.text(detail, 500));
+              }
               /** 先生成唯一公开信封，搜索许可必须与模型实际看见的链接一致。 */
-              const envelope = this.safety.result(data);
+              const envelope = this.safety.result(data, 'mcp', business ? 128000 : 7000);
+              /** 业务解析不能把被裁剪的数据当作完整供应商结果落库。 */
+              if (business && envelope.truncated)
+                throw new McpToolError(
+                  'MCP_RESULT_INCOMPLETE',
+                  '供应商结果未能完整解析，请缩小查询范围；本次没有保存不完整报价',
+                );
               /** 查询参数清理后链接可能变化；不能登记原始地址却要求模型使用隐藏地址。 */
               if (/search/.test(original.name)) this.collectUrls(envelope.data, evidence);
               /** 模型与UI只接收这份相同的脱敏、限长、标记不可信的结果。 */

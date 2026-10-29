@@ -39,13 +39,16 @@ export class ToolSafety {
     /** 结束文本清理。 */
   }
   /** 递归处理有限JSON结构，不调用外部对象方法。 */
-  value(value: unknown, depth = 0): unknown {
+  value(value: unknown, depth = 0, business = false): unknown {
     /** 限深后直接返回安全标量。 */
-    if (depth > 6) return '[层级已截断]';
-    if (typeof value === 'string') return this.text(value, 4000);
+    if (depth > (business ? 10 : 6)) return '[层级已截断]';
+    if (typeof value === 'string') return this.text(value, business ? 40000 : 4000);
     if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
     /** 数组最多三十项，控制上下文与UI体积。 */
-    if (Array.isArray(value)) return value.slice(0, 30).map((item) => this.value(item, depth + 1));
+    if (Array.isArray(value))
+      return value
+        .slice(0, business ? 50 : 30)
+        .map((item) => this.value(item, depth + 1, business));
     /** 丢弃原型字段和媒体数据，认证字段整体替换。 */
     if (typeof value === 'object')
       return Object.fromEntries(
@@ -67,39 +70,79 @@ export class ToolSafety {
             this.text(key, 100),
             /authorization|cookie|password|secret|api.?key|access.?token|refresh.?token/i.test(key)
               ? '[已隐藏]'
-              : this.value(item, depth + 1),
+              : this.value(item, depth + 1, business),
           ]),
       );
     /** 不执行toString等潜在副作用。 */
     return '[非JSON数据]';
     /** 结束结构清理。 */
   }
-  /** 模型与网页使用相同结果，且标记外部资料不可信。 */
-  result(value: unknown, kind: 'mcp' | 'internal' = 'mcp') {
-    /** 记录递归清理是否改变原始数据。 */
-    const data = this.value(value);
-    const encoded = JSON.stringify(data);
-    let truncated = false;
-    try {
-      truncated = JSON.stringify(value) !== encoded;
-    } catch {
+  /** 公开信封保留可解析JSON；业务解析通道使用更大但仍有界的容量，不先截断再解析。 */
+  result(value: unknown, kind: 'mcp' | 'internal' = 'mcp', maxBytes = 7000) {
+    const business = maxBytes > 7000;
+    let data = this.value(value, 0, business);
+    let truncated = this.losesData(value, 0, business);
+    /** 只对公开大结果缩短文本和候选列表，禁止生成半截JSON字符串冒充有效数据。 */
+    for (const limit of [1000, 400, 120, 40]) {
+      if (Buffer.byteLength(JSON.stringify(data)) <= maxBytes) break;
       truncated = true;
+      data = this.compact(data, limit);
     }
-    /** 总体数据不超过约7KiB，给事件公共字段预留空间。 */
+    if (Buffer.byteLength(JSON.stringify(data)) > maxBytes) {
+      truncated = true;
+      data = {
+        omitted: true,
+        note: '结果超过展示上限，请缩小查询范围；没有完整展示的字段不能视为不存在。',
+      };
+    }
+    const checkedAt = new Date();
     return {
       kind,
-      data:
-        Buffer.byteLength(encoded) > 7000
-          ? {
-              preview: this.text(encoded, 6500),
-              note: '结果过大，请缩小查询范围',
-            }
-          : data,
-      truncated: truncated || Buffer.byteLength(encoded) > 7000,
+      data,
+      truncated,
       untrusted: kind === 'mcp',
-      checkedAt: new Date().toISOString(),
+      checkedAt: checkedAt.toISOString(),
+      checkedAtLocal:
+        new Intl.DateTimeFormat('sv-SE', {
+          timeZone: 'Asia/Shanghai',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        }).format(checkedAt) + ' Asia/Shanghai',
     };
-    /** 结束结果信封。 */
+  }
+  /** 脱敏与数据裁剪分开计数，移除认证信息不会误判成票价不完整。 */
+  private losesData(value: unknown, depth = 0, business = false): boolean {
+    if (depth > (business ? 10 : 6)) return true;
+    if (typeof value === 'string') return Buffer.byteLength(value) > (business ? 40000 : 4000);
+    if (Array.isArray(value))
+      return (
+        value.length > (business ? 50 : 30) ||
+        value.some((item) => this.losesData(item, depth + 1, business))
+      );
+    if (value && typeof value === 'object')
+      return (
+        Object.keys(value).length > 50 ||
+        Object.values(value).some((item) => this.losesData(item, depth + 1, business))
+      );
+    return false;
+  }
+  /** 结构性缩减始终返回完整JSON值，金额、布尔和数字字段保持原值。 */
+  private compact(value: unknown, textLimit: number): unknown {
+    if (typeof value === 'string') return this.text(value, textLimit);
+    if (Array.isArray(value))
+      return value
+        .slice(0, Math.max(1, Math.floor(textLimit / 200)))
+        .map((item) => this.compact(item, textLimit));
+    if (value && typeof value === 'object')
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, this.compact(item, textLimit)]),
+      );
+    return value;
   }
 }
 /** 只允许公共HTTP来源，禁止本机、内网、IPv6字面量和凭据URL。 */

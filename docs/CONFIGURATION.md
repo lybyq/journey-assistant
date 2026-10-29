@@ -74,7 +74,7 @@ Vue 脚本沿用 JSDoc；模板使用合法 `<!-- ... -->`；CSS 使用 `/** ...
 
 身份与存储已读取并验证 `DATABASE_URL`、`REDIS_URL`、`STORAGE_ENABLED`、`AUTH_SECRET`、`REDIS_PREFIX`、`ACCESS_TOKEN_SECONDS` 和 `REFRESH_TOKEN_DAYS`。`pnpm storage:setup`生成不覆盖原文件的`.env.storage.local`，其优先级在原`.env`之前、进程环境之后。真实就绪状态见`/api/v1/system/storage`；未启用存储时返回disabled，身份接口明确不可用。
 
-智能体运行默认总时限120秒、累计50000 token、最多12次模型和20次工具调用；AGENT_MAX_OUTPUT_TOKENS默认4096（允许256～8192）。格式修复最多一次且计入同一运行预算，不自动重试真实外部工具。
+智能体运行默认总时限180秒、累计50000 token、最多12次模型和20次工具调用；AGENT_MAX_OUTPUT_TOKENS默认4096（允许256～8192）。格式修复最多一次且计入同一运行预算，不自动重试真实外部工具。
 
 ## 网页环境变量
 
@@ -95,7 +95,7 @@ Web dependencies 包含 Vue、Router、Pinia、marked、DOMPurify、按语言导
 
 ## 旅行服务环境与学习约定
 
-`CHAT_EXECUTOR=agent`默认真实问答；缺模型配置明确失败。仅本机测试可用diagnostic，生产拒绝。AGENT_TIMEOUT_MS默认120000，AGENT_MAX_MODEL_CALLS默认12，AGENT_MAX_TOOL_CALLS默认20，AGENT_MAX_TOKENS默认50000；主子代理共同计数，缺usage时明确标注估算。
+`CHAT_EXECUTOR=agent`默认真实问答；缺模型配置明确失败。仅本机测试可用diagnostic，生产拒绝。AGENT_TIMEOUT_MS默认180000，AGENT_MAX_MODEL_CALLS默认12，AGENT_MAX_TOOL_CALLS默认20，AGENT_MAX_TOKENS默认50000；主子代理共同计数，缺usage时明确标注估算。
 
 MCP_SERVERS默认train,amap,tavily，空值关闭全部；MCP_CONNECT_TIMEOUT_MS默认15000，MCP_TOOL_TIMEOUT_MS默认20000，MCP_CIRCUIT_MS默认30000。12306使用锁定npm依赖0.3.10，直接Node启动，不临时npx安装。所有Key只放后端，示例模板保持空值。
 
@@ -110,3 +110,5 @@ PUBLIC_WEB_URL是分享使用的可信网页地址，不从请求Host推断。AM
 ## 统一格式化
 
 执行pnpm format格式化所有手写TS、JSON、Vue、CSS、YAML和Markdown；pnpm format:check验证格式，已纳入pnpm check。规则见.prettierrc.json。依赖、构建目录、本地验收文件与自动生成锁文件由.prettierignore排除。
+
+查询阶段比整轮硬超时提前结束：默认180秒整轮为最后一次模型回答和落库预留40秒，届时取消真实查询连接并停止排队查询。QUERY_TIME_LIMIT说明时间预算已到，不把供应商标成连接故障；模型用已保存结果生成最终正文，明确未完成项。Token、模型次数和工具次数上限仍独立生效，查询阶段结束不扩大这些配额。

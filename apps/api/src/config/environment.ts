@@ -78,7 +78,7 @@ const environmentSchema = z.object({
   /** 默认真实智能体；诊断仅供本机验收。 */
   CHAT_EXECUTOR: z.enum(['agent', 'diagnostic']).default('agent'),
   /** 硬时限、调用次数和累计token预算。 */
-  AGENT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300000).default(120000),
+  AGENT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300000).default(180000),
   AGENT_MAX_MODEL_CALLS: z.coerce.number().int().min(1).max(30).default(12),
   AGENT_MAX_TOOL_CALLS: z.coerce.number().int().min(1).max(40).default(20),
   AGENT_MAX_TOKENS: z.coerce.number().int().min(1000).max(200000).default(50000),

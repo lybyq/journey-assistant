@@ -13,12 +13,14 @@ export const safeToolResultSchema = z.object({
   kind: z.enum(['mcp', 'internal']),
   /** 供应商结果结构不同；内容已由后端统一脱敏并限长。 */
   data: z.unknown(),
-  /** 原始结构被清理或裁剪时明确告知，不能当完整证据归档。 */
+  /** 业务资料因长度或层级被裁剪时明确告知；认证脱敏不会伪装成票价缺失。 */
   truncated: z.boolean(),
   /** 外部资料不具备指令权限，模型必须按资料处理。 */
   untrusted: z.boolean(),
   /** 查询完成的实际时间，不能用网页抓取时间代替报价有效期。 */
   checkedAt: z.string().datetime(),
+  /** 已由服务端转换的上海时间，避免模型把UTC日期误当作本地日期。 */
+  checkedAtLocal: z.string().max(80).optional(),
 });
 /** 公开状态不包含endpoint、认证头和子进程参数。 */
 export const mcpStatusSchema = z.object({

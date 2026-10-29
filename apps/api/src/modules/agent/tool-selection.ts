@@ -42,6 +42,7 @@ export class ToolSelection {
       [
         'journey_tools_select',
         'journey_trip_read',
+        'journey_capabilities',
         'journey_budget',
         'journey_current_time',
         'write_todos',
@@ -54,6 +55,10 @@ export class ToolSelection {
     if (name === 'amap__maps_weather') return this.enabled.has('weather');
     if (name.startsWith('amap__')) return this.enabled.has('maps');
     return false;
+  }
+  /** 需求保存成功后卸载较大的补丁Schema；确需修改时仍可通过目录重新加载。 */
+  completed(name: string): void {
+    if (name === 'journey_trip_update') this.enabled.delete('request');
   }
   /** 工具名称与参数在实际LangChain循环中执行，下一次模型请求才看到新增Schema。 */
   tool() {

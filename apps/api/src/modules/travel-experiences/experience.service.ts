@@ -41,6 +41,10 @@ export class ExperienceService {
     private readonly mcp: TravelMcpService,
     private readonly supplier: SupplierService,
   ) {}
+  /** 只读配置摘要供智能体决定是否能查库存，不暴露任何密钥。 */
+  supplierStatus() {
+    return this.supplier.status();
+  }
   /** 地点搜索只证明名称/地址/位置，营业、预约和价格保持未知。 */
   async places(
     userId: string,
@@ -94,7 +98,16 @@ export class ExperienceService {
       }),
     );
     return this.repository.mutate(userId, id, revision, (document) => {
-      document.experiences.push(...entries);
+      /** 同一地点查询更新坐标，保留已有ID、价格和人工核验条款，避免重复候选占满容量。 */
+      for (const entry of entries) {
+        const existing = document.experiences.find(
+          (old) =>
+            old.kind === entry.kind && old.name === entry.name && old.address === entry.address,
+        );
+        if (existing) {
+          if (entry.point) existing.point = entry.point;
+        } else document.experiences.push(entry);
+      }
       return document;
     });
   }

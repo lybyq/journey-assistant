@@ -252,6 +252,22 @@ beforeAll(async () => {
         else modelReply(response, '## 行程\n\n尚未结束的列表', undefined, 50, 'length');
         return;
       }
+      /** 慢查询到达阶段截止点后，最后一次请求必须无工具收束而不是等待整轮硬中断。 */
+      if (joined.includes('TEST_SCENARIO:query-deadline')) {
+        if (joined.includes('现在整理最终回答'))
+          modelReply(
+            response,
+            '## 查询阶段结束后的回答\n\n已保存的事实保留，未完成资料明确待核实。',
+          );
+        else if (!called.includes('journey_tools_select'))
+          modelReply(response, '', {
+            name: 'journey_tools_select',
+            args: { domains: ['research'] },
+          });
+        else
+          modelReply(response, '', { name: 'tavily__tavily_search', args: { query: 'slow-tool' } });
+        return;
+      }
       /** 模拟真实计费量较大的工具循环，最后一轮必须取消工具并生成正文。 */
       if (joined.includes('TEST_SCENARIO:reserve')) {
         if (
@@ -435,33 +451,42 @@ beforeAll(async () => {
         return;
       }
       result =
-        body.params.arguments.query === 'tool-error'
+        body.params.arguments.query === 'payload-error'
           ? {
-              isError: true,
               content: [
                 {
                   type: 'text',
-                  text: 'fixture供应商错误',
+                  text: JSON.stringify({ status: '0', info: 'INVALID_USER_KEY fixture' }),
                 },
               ],
             }
-          : {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    results: [
-                      {
-                        url: 'https://example.org/trip?utm_source=fixture',
-                        title: 'fixture资料',
-                        content: '官方资料摘要',
-                      },
-                    ],
-                    api_key: 'test-private-key-should-not-leak',
-                  }),
-                },
-              ],
-            };
+          : body.params.arguments.query === 'tool-error'
+            ? {
+                isError: true,
+                content: [
+                  {
+                    type: 'text',
+                    text: 'fixture供应商错误',
+                  },
+                ],
+              }
+            : {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      results: [
+                        {
+                          url: 'https://example.org/trip?utm_source=fixture',
+                          title: 'fixture资料',
+                          content: '官方资料摘要',
+                        },
+                      ],
+                      api_key: 'test-private-key-should-not-leak',
+                    }),
+                  },
+                ],
+              };
     }
     /** SDK允许的ping不影响调用统计。 */
     else result = {};
@@ -612,6 +637,10 @@ describe('旅行服务真实SDK集成', () => {
     try {
       await separate.discover(new AbortController().signal);
       const tools = separate.tools(new AbortController().signal);
+      await expect(tools[0]!.invoke({ query: 'payload-error' })).rejects.toMatchObject({
+        code: 'MCP_PROVIDER_REJECTED',
+        message: 'INVALID_USER_KEY fixture',
+      });
       await expect(
         tools[0]!.invoke({
           query: 'tool-error',
@@ -715,6 +744,29 @@ describe('旅行服务真实SDK集成', () => {
       }),
     ).toBeUndefined();
   }, 20000);
+  /** 查询时限使用真实MCP延迟和关闭连接，必须交付正文且不能把供应商误标故障。 */
+  it('查询阶段提前结束，为最终回答留出时间', async () => {
+    const probe = capture();
+    const limited = { env: { ...config.env, AGENT_TIMEOUT_MS: 1500 } } as AppConfig;
+    await new AgentService(limited, service, checkpoints).execute(
+      input('query-deadline'),
+      new AbortController().signal,
+      probe.publish,
+    );
+    expect(
+      probe.events.some(
+        (event) => event.type === 'tool.failed' && event.payload.code === 'QUERY_TIME_LIMIT',
+      ),
+    ).toBe(true);
+    expect(
+      probe.events
+        .filter((event) => event.type === 'message.delta')
+        .map((event) => event.payload.content)
+        .join(''),
+    ).toContain('查询阶段结束后的回答');
+    expect(JSON.stringify(modelRequests.at(-1)?.tools ?? [])).not.toContain('tavily_search');
+    expect(service.statuses()[0]?.state).toBe('ready');
+  }, 10000);
   /** 子代理报告只作为工具结果，不能重复拼进主回答正文。 */
   it('受控研究子代理真实执行且主回答不混入子代理流', async () => {
     const probe = capture();

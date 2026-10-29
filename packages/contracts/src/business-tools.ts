@@ -1,6 +1,7 @@
 /** 工具领域同时用于服务器批准集合和界面的业务名称。 */
 export const BUSINESS_TOOL_DOMAINS = {
   journey_tools_select: '能力目录',
+  journey_capabilities: '供应商配置',
   journey_trip_read: '旅行需求',
   journey_trip_update: '旅行需求',
   journey_research: '资料检索',

@@ -1,3 +1,5 @@
+/** 公开投影保留票价等关键事实，完整领域文档不重复塞入模型上下文。 */
+import { travelToolSummary } from './tool-summary.js';
 /** 把完整业务服务装成LangChain工具，不在提示词里假装实现业务。 */
 import { BadRequestException, Injectable } from '@nestjs/common';
 /** 使用真实LangChain tool构造器，SDK负责解析tool_calls。 */
@@ -90,41 +92,14 @@ export class TravelAgentTools {
     /** 输出使用统一信封，模型与网页看到完全相同的数据。 */
     const result = (data: unknown) => JSON.stringify(this.mcp.safety.result(data, 'internal'));
     /** 只返回相关的少量候选，避免一次工具结果超出上下文预算。 */
-    const summary = (trip: TripWorkspace, section: string, previous?: TripWorkspace) => ({
-      tripId: trip.id,
-      revision: trip.revision,
-      ...(section === 'request'
-        ? { request: trip.document.request, clarifications: trip.clarifications }
-        : {
-            context: {
-              destination: trip.document.request.destination,
-              startDate: trip.document.request.startDate,
-              adults: trip.document.request.adults,
-              children: trip.document.request.children,
-            },
-          }),
-      section,
-      data:
-        section === 'plans'
-          ? trip.versions.slice(0, 8)
-          : section === 'request'
-            ? null
-            : (trip.document[section as 'evidence'] ?? [])
-                .filter(
-                  (item) =>
-                    !previous?.document[section as 'evidence']?.some(
-                      (saved) => saved.id === item.id,
-                    ),
-                )
-                .slice(-6),
-    });
+    const summary = travelToolSummary;
     /** 子代理可读取本会话数据与预算，但不能修改项目和方案。 */
     const read = tool(
       async (args) => {
         const trip = await current();
         return result(
           trip
-            ? summary(trip, args.section)
+            ? summary(trip, args.section, undefined, args.offset)
             : {
                 exists: false,
                 next: '请先澄清需求，通过journey_trip_update建立旅行项目',
@@ -136,6 +111,7 @@ export class TravelAgentTools {
         description: '旅行需求：读取当前会话旅行需求或某类已保存候选；不接受其他用户/项目标识。',
         schema: z
           .object({
+            offset: z.number().int().min(0).max(100).default(0),
             section: z.enum([
               'request',
               'evidence',
@@ -163,7 +139,17 @@ export class TravelAgentTools {
         schema: z.object({}).strict(),
       },
     );
-    if (readOnly) return [read, budget];
+    /** 配置状态属于服务事实，模型在调用库存查询前读取，不能把缺少授权当作没有房源。 */
+    const capabilities = tool(
+      () => result({ mcp: this.mcp.statuses(), suppliers: this.experiences.supplierStatus() }),
+      {
+        name: 'journey_capabilities',
+        description:
+          '读取真实配置状态：酒店/航班需要amadeus configured=true；旅行团需要tour_gateway configured=true。缺少配置时不要调用库存工具，明确说明并继续可用查询。',
+        schema: z.object({}).strict(),
+      },
+    );
+    if (readOnly) return [read, budget, capabilities];
     /** 所有修改在运行内依次读取最新revision，网页跨标签修改仍由原CAS拒绝覆盖。 */
     const update = tool(
       async (args) =>
@@ -189,8 +175,10 @@ export class TravelAgentTools {
           '旅行需求：仅保存用户明确确认的需求；缺失字段继续null并追问，不猜日期人数。首次调用自动建立本会话项目。',
         schema: z
           .object({
-            title: z.string().max(100).optional(),
-            patch: tripRequestPatchSchema,
+            title: z.string().max(100).optional().describe('项目标题放在此字段，禁止放入patch'),
+            patch: tripRequestPatchSchema.describe(
+              '只允许旅行需求字段；title必须放在外层，与patch同级',
+            ),
           })
           .strict(),
       },
@@ -469,6 +457,7 @@ export class TravelAgentTools {
     );
     return [
       read,
+      capabilities,
       update,
       research,
       rail,

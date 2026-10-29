@@ -55,6 +55,27 @@ export class TravelRepository {
       throw new BadRequestException('旅行资料格式不合法');
     }
   }
+  /** 容量边界转换成明确业务错误，避免模型把Zod异常当供应商故障反复补查。 */
+  private parseDocument(value: unknown): TripDocument {
+    const parsed = tripDocumentSchema.safeParse(value);
+    if (parsed.success) return parsed.data;
+    const labels: Record<string, string> = {
+      transport: '交通候选',
+      experiences: '住宿游玩候选',
+      costs: '费用项',
+      evidence: '来源资料',
+      driving: '自驾路线',
+      tours: '旅行团',
+    };
+    const limit = parsed.error.issues.find(
+      (issue) => issue.code === 'too_big' && issue.path.length === 1,
+    );
+    if (limit?.code === 'too_big')
+      throw new BadRequestException(
+        `${labels[String(limit.path[0])] ?? '旅行资料'}最多${limit.maximum}项，请停止重复查询并使用已保存候选，或新建旅行项目`,
+      );
+    throw new BadRequestException('旅行资料格式不符合要求，请核对查询条件，不要重复执行相同请求');
+  }
   /** 聚合内实体ID必须唯一；报价快照可以被候选引用，但不能重复入账。 */
   private validateDocument(document: TripDocument): TripDocument {
     for (const key of [
@@ -156,7 +177,7 @@ export class TravelRepository {
           userId,
           this.mcp.safety.text(title, 400),
           conversationId,
-          this.validateDocument(tripDocumentSchema.parse(this.clean(document))),
+          this.validateDocument(this.parseDocument(this.clean(document))),
         ],
       );
       await this.audit(client, userId, 'trip.created', saved.rows[0]!.id);
@@ -177,7 +198,7 @@ export class TravelRepository {
         throw new ConflictException('项目已被另一操作更新，请刷新后重试');
       if (row.archived && metadata?.archived !== false)
         throw new BadRequestException('请先恢复已归档项目');
-      const document = tripDocumentSchema.parse(this.clean(work(structuredClone(row.document))));
+      const document = this.parseDocument(this.clean(work(structuredClone(row.document))));
       document.request = this.requests.normalize({}, document.request);
       this.validateDocument(document);
       const result = await client.query<TripRow>(

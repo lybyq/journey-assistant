@@ -65,6 +65,20 @@ export class TravelAgentTools {
   ) {}
   /** 客户端和模型都不能指定userId或任意tripId，身份从真实AgentInput闭包取得。 */
   forRun(input: AgentInput, signal: AbortSignal, readOnly = false) {
+    /** 同轮保存操作串行读取最新revision，避免模型并行调用多个查询时自相冲突。 */
+    let writes: Promise<unknown> = Promise.resolve();
+    const serial = <T>(work: () => Promise<T>): Promise<T> => {
+      const pending = writes.then(() => {
+        signal.throwIfAborted();
+        return work();
+      });
+      /** 前一项业务失败不能使后续无关操作永久排队失败。 */
+      writes = pending.then(
+        () => undefined,
+        () => undefined,
+      );
+      return pending;
+    };
     /** 延迟定位项目，普通问候不会自动创建旅行项目。 */
     const current = () => this.repository.forConversation(input.userId, input.conversationId);
     /** 未绑定项目必须先通过受校验需求工具创建。 */
@@ -76,18 +90,33 @@ export class TravelAgentTools {
     /** 输出使用统一信封，模型与网页看到完全相同的数据。 */
     const result = (data: unknown) => JSON.stringify(this.mcp.safety.result(data, 'internal'));
     /** 只返回相关的少量候选，避免一次工具结果超出上下文预算。 */
-    const summary = (trip: TripWorkspace, section: string) => ({
+    const summary = (trip: TripWorkspace, section: string, previous?: TripWorkspace) => ({
       tripId: trip.id,
       revision: trip.revision,
-      request: trip.document.request,
-      clarifications: trip.clarifications,
+      ...(section === 'request'
+        ? { request: trip.document.request, clarifications: trip.clarifications }
+        : {
+            context: {
+              destination: trip.document.request.destination,
+              startDate: trip.document.request.startDate,
+              adults: trip.document.request.adults,
+              children: trip.document.request.children,
+            },
+          }),
       section,
       data:
         section === 'plans'
           ? trip.versions.slice(0, 8)
           : section === 'request'
-            ? trip.document.request
-            : (trip.document[section as 'evidence'] ?? []).slice(-8),
+            ? null
+            : (trip.document[section as 'evidence'] ?? [])
+                .filter(
+                  (item) =>
+                    !previous?.document[section as 'evidence']?.some(
+                      (saved) => saved.id === item.id,
+                    ),
+                )
+                .slice(-6),
     });
     /** 子代理可读取本会话数据与预算，但不能修改项目和方案。 */
     const read = tool(
@@ -135,24 +164,25 @@ export class TravelAgentTools {
       },
     );
     if (readOnly) return [read, budget];
-    /** 所有修改保持当前revision；并发修改冲突会让模型重新读取而不是覆盖。 */
+    /** 所有修改在运行内依次读取最新revision，网页跨标签修改仍由原CAS拒绝覆盖。 */
     const update = tool(
-      async (args) => {
-        const trip = await current();
-        const saved = trip
-          ? await this.trips.update(input.userId, trip.id, {
-              revision: trip.revision,
-              request: args.patch,
-            })
-          : await this.trips.create(input.userId, {
-              title: args.title ?? '对话中的旅行计划',
-              conversationId: input.conversationId,
-              request: args.patch,
-              text:
-                input.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '',
-            });
-        return result(summary(saved, 'request'));
-      },
+      async (args) =>
+        serial(async () => {
+          const trip = await current();
+          const saved = trip
+            ? await this.trips.update(input.userId, trip.id, {
+                revision: trip.revision,
+                request: args.patch,
+              })
+            : await this.trips.create(input.userId, {
+                title: args.title ?? '对话中的旅行计划',
+                conversationId: input.conversationId,
+                request: args.patch,
+                text:
+                  input.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '',
+              });
+          return result(summary(saved, 'request'));
+        }),
       {
         name: 'journey_trip_update',
         description:
@@ -174,18 +204,19 @@ export class TravelAgentTools {
         signal: AbortSignal,
       ) => Promise<TripWorkspace | { workspace: TripWorkspace }>,
       section: string,
-    ) => {
-      const trip = await requireTrip();
-      const saved = await this.operations.run(
-        input.userId,
-        trip.id,
-        module,
-        name,
-        signal,
-        (combined) => work(trip, combined),
-      );
-      return result(summary('workspace' in saved ? saved.workspace : saved, section));
-    };
+    ) =>
+      serial(async () => {
+        const trip = await requireTrip();
+        const saved = await this.operations.run(
+          input.userId,
+          trip.id,
+          module,
+          name,
+          signal,
+          (combined) => work(trip, combined),
+        );
+        return result(summary('workspace' in saved ? saved.workspace : saved, section, trip));
+      });
     /** 资料工具真实执行Search→Extract并保存可追溯证据。 */
     const research = tool(
       (args) =>
@@ -299,34 +330,35 @@ export class TravelAgentTools {
     );
     /** 人工估算是用户提供的假设，始终不能升级成live_quote。 */
     const estimate = tool(
-      async (args) => {
-        const trip = await requireTrip();
-        const request = trip.document.request;
-        const item = {
-          id: randomUUID(),
-          label: args.label,
-          category: args.category,
-          scopeKey: `manual:${randomUUID()}`,
-          priceType: 'estimate' as const,
-          unitAmountMinor: decimalMinor(args.amount, args.currency),
-          currency: args.currency,
-          quantity: args.quantity,
-          unit: args.unit,
-          required: true,
-          selected: true,
-          includes: [],
-          provenance: 'manual' as const,
-          provider: '用户明确提供的估算',
-          sourceUrl: null,
-          evidenceIds: [],
-          checkedAt: new Date().toISOString(),
-          validUntil: null,
-          conditions: requestConditions(request),
-          notes: args.assumption,
-        };
-        const saved = await this.quotes.add(input.userId, trip.id, trip.revision, item);
-        return result(summary(saved, 'costs'));
-      },
+      async (args) =>
+        serial(async () => {
+          const trip = await requireTrip();
+          const request = trip.document.request;
+          const item = {
+            id: randomUUID(),
+            label: args.label,
+            category: args.category,
+            scopeKey: `manual:${randomUUID()}`,
+            priceType: 'estimate' as const,
+            unitAmountMinor: decimalMinor(args.amount, args.currency),
+            currency: args.currency,
+            quantity: args.quantity,
+            unit: args.unit,
+            required: true,
+            selected: true,
+            includes: [],
+            provenance: 'manual' as const,
+            provider: '用户明确提供的估算',
+            sourceUrl: null,
+            evidenceIds: [],
+            checkedAt: new Date().toISOString(),
+            validUntil: null,
+            conditions: requestConditions(request),
+            notes: args.assumption,
+          };
+          const saved = await this.quotes.add(input.userId, trip.id, trip.revision, item);
+          return result(summary(saved, 'costs'));
+        }),
       {
         name: 'journey_estimate_add',
         description:
@@ -355,18 +387,19 @@ export class TravelAgentTools {
     );
     /** 生成只选择现有候选和现有报价，服务端重新计算预算。 */
     const generate = tool(
-      async (args) => {
-        const trip = await requireTrip();
-        const version = await this.plans.generate(input.userId, trip.id, trip.revision, args);
-        return result({
-          id: version.id,
-          version: version.version,
-          status: version.status,
-          violations: version.violations,
-          budget: version.budget,
-          days: version.draft.days,
-        });
-      },
+      async (args) =>
+        serial(async () => {
+          const trip = await requireTrip();
+          const version = await this.plans.generate(input.userId, trip.id, trip.revision, args);
+          return result({
+            id: version.id,
+            version: version.version,
+            status: version.status,
+            violations: version.violations,
+            budget: version.budget,
+            days: version.draft.days,
+          });
+        }),
       {
         name: 'journey_plan_generate',
         description:
@@ -376,42 +409,43 @@ export class TravelAgentTools {
     );
     /** 局部编辑只开放时间、候选和备注字段，坐标和报价从候选真实资料派生。 */
     const adjust = tool(
-      async (args) => {
-        const trip = await requireTrip();
-        const base = await this.repository.version(input.userId, trip.id, args.versionId);
-        const existing = base.draft.days
-          .flatMap((day) => day.items)
-          .find((item) => item.id === args.itemId);
-        if (!existing) throw new BadRequestException('活动不存在');
-        let replacement: ScheduleItem = { ...existing, ...args.changes };
-        if (args.changes.referenceId) {
-          const candidate = trip.document.experiences.find(
-            (item) => item.id === args.changes.referenceId,
-          );
-          if (!candidate) throw new BadRequestException('替换地点不属于当前项目');
-          replacement = {
-            ...replacement,
-            title: candidate.name,
-            point: candidate.point,
-            evidenceIds: candidate.evidenceIds,
-            referenceId: candidate.id,
-            costIds: candidate.quote ? [candidate.quote.id] : [],
-          };
-        }
-        const version = await this.plans.replace(input.userId, trip.id, trip.revision, {
-          baseVersionId: base.id,
-          itemId: existing.id,
-          replacement,
-          reason: args.reason,
-        });
-        return result({
-          id: version.id,
-          version: version.version,
-          status: version.status,
-          violations: version.violations,
-          budget: version.budget,
-        });
-      },
+      async (args) =>
+        serial(async () => {
+          const trip = await requireTrip();
+          const base = await this.repository.version(input.userId, trip.id, args.versionId);
+          const existing = base.draft.days
+            .flatMap((day) => day.items)
+            .find((item) => item.id === args.itemId);
+          if (!existing) throw new BadRequestException('活动不存在');
+          let replacement: ScheduleItem = { ...existing, ...args.changes };
+          if (args.changes.referenceId) {
+            const candidate = trip.document.experiences.find(
+              (item) => item.id === args.changes.referenceId,
+            );
+            if (!candidate) throw new BadRequestException('替换地点不属于当前项目');
+            replacement = {
+              ...replacement,
+              title: candidate.name,
+              point: candidate.point,
+              evidenceIds: candidate.evidenceIds,
+              referenceId: candidate.id,
+              costIds: candidate.quote ? [candidate.quote.id] : [],
+            };
+          }
+          const version = await this.plans.replace(input.userId, trip.id, trip.revision, {
+            baseVersionId: base.id,
+            itemId: existing.id,
+            replacement,
+            reason: args.reason,
+          });
+          return result({
+            id: version.id,
+            version: version.version,
+            status: version.status,
+            violations: version.violations,
+            budget: version.budget,
+          });
+        }),
       {
         name: 'journey_plan_adjust',
         description:

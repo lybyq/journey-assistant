@@ -6,6 +6,14 @@ import { createServer, type Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 /** 使用真实PostgreSQL迁移和仓储，不用内存对象冒充保存成功。 */
 import { Pool } from 'pg';
+/** 并行工具回归使用真实Redis配额，只清理随机测试前缀。 */
+import { createClient } from 'redis';
+/** 实际Agent工具负责同轮业务写入的排队。 */
+import { TravelAgentTools } from '../apps/api/dist/modules/travel/travel-agent-tools.js';
+import { TravelOperations } from '../apps/api/dist/modules/travel-delivery/operations.service.js';
+import { PricingService } from '../apps/api/dist/modules/travel-pricing/pricing.service.js';
+import { QuoteService } from '../apps/api/dist/modules/travel-pricing/quote.service.js';
+import { PlanService } from '../apps/api/dist/modules/travel-plans/plan.service.js';
 /** 共用生产契约。 */
 import { tripWorkspaceSchema, type TripWorkspace } from '@journey/contracts';
 /** 编译后的类保留Nest装饰器与原版SDK。 */
@@ -423,6 +431,89 @@ afterAll(async () => {
 }, 20000);
 /** 全部是实际生产服务经真实协议的集成调用。 */
 describe('旅行服务供应商协议链路', () => {
+  /** 两个工具仍由真实MCP查询并落SQL，不能因读取同一个revision导致一个保存失败。 */
+  it('同轮并行地点工具依次保存且不丢候选', async () => {
+    const cache = createClient({
+      url: process.env.TEST_REDIS_URL ?? 'redis://127.0.0.1:56379',
+      socket: { reconnectStrategy: false },
+    });
+    cache.on('error', () => undefined);
+    const prefix = `parallel_tool_test_${randomUUID().replaceAll('-', '')}`;
+    await cache.connect();
+    try {
+      const config = {
+        env: parseEnvironment({ NODE_ENV: 'test', REDIS_PREFIX: prefix }),
+      } as AppConfig;
+      const storage = { sql: db, redis: cache } as StorageService;
+      const conversationId = (
+        await db.query('INSERT INTO conversations(user_id,title) VALUES($1,$2) RETURNING id', [
+          owner,
+          '并行工具回归',
+        ])
+      ).rows[0].id;
+      const trips = new TravelService(repository, new TripRequestService());
+      const isolated = await trips.create(owner, {
+        title: '并行保存验收',
+        conversationId,
+        text: '',
+        request: { origin: '杭州', destination: '苏州' },
+      });
+      const pricing = new PricingService();
+      const tools = new TravelAgentTools(
+        repository,
+        trips,
+        research,
+        transport,
+        driving,
+        experience,
+        tours,
+        new QuoteService(repository, pricing),
+        new PlanService(repository, pricing),
+        new TravelOperations(storage, config, repository),
+        mcp,
+      ).forRun(
+        {
+          runId: randomUUID(),
+          userId: owner,
+          conversationId,
+          messages: [],
+          profile: { homeCity: '', preferredMode: 'independent', pace: 'balanced' },
+        },
+        new AbortController().signal,
+      );
+      const places = tools.find((tool) => tool.name === 'journey_places')!;
+      const results = await Promise.all([
+        places.invoke({ city: '苏州', keywords: '景点', kind: 'attraction' }),
+        places.invoke({ city: '苏州', keywords: '餐厅', kind: 'restaurant' }),
+      ]);
+      expect(results).toHaveLength(2);
+      const saved = await repository.get(owner, isolated.id);
+      expect(saved.revision).toBe(isolated.revision + 2);
+      expect(saved.document.experiences.map((item) => item.kind).sort()).toEqual([
+        'attraction',
+        'restaurant',
+      ]);
+      /** 超出容量必须是清晰的业务拒绝，事务不能留下部分候选或新revision。 */
+      await expect(
+        repository.mutate(owner, isolated.id, saved.revision, (document) => {
+          document.experiences = Array.from({ length: 61 }, () => ({
+            ...saved.document.experiences[0]!,
+            id: randomUUID(),
+          }));
+          return document;
+        }),
+      ).rejects.toThrow('住宿游玩候选最多60项');
+      expect((await repository.get(owner, isolated.id)).revision).toBe(saved.revision);
+      const operations = await db.query('SELECT status FROM trip_operations WHERE trip_id=$1', [
+        isolated.id,
+      ]);
+      expect(operations.rows.map((row) => row.status)).toEqual(['completed', 'completed']);
+    } finally {
+      const keys = await cache.keys(`${prefix}:*`);
+      if (keys.length) await cache.del(keys);
+      cache.destroy();
+    }
+  });
   /** Search和Extract必须共享运行级来源许可；缓存命中不再次调用供应商。 */
   it('搜索抽取真实执行且时效缓存减少重复请求', async () => {
     const result = await research.search(

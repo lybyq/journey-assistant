@@ -29,6 +29,8 @@ import { AGENT_PROMPT_VERSION, JOURNEY_SYSTEM_PROMPT } from './agent.prompt.js';
 import { executionMiddleware, type RunBudget } from './agent.middleware.js';
 /** 每轮模型只接收已选择的能力Schema，降低固定工具目录的重复输入费用。 */
 import { ToolSelection } from './tool-selection.js';
+/** 官方DeepSeek使用明确的非思考模式，避免当前兼容SDK的推理协议不匹配。 */
+import { providerModelOptions } from './model-options.js';
 /** 统一执行输入、受控异常和事件出口。 */
 import {
   ExecutionError,
@@ -36,22 +38,10 @@ import {
   type AgentInput,
   type PublishEvent,
 } from './execution.types.js';
-/** 只提取公开text块，绝不读reasoning_content或reasoning块。 */
-export function publicAnswer(content: unknown): string {
-  const text =
-    typeof content === 'string'
-      ? content
-      : Array.isArray(content)
-        ? content
-            .filter((block) => block?.type === 'text' && typeof block.text === 'string')
-            .map((block) => block.text)
-            .join('')
-        : '';
-  return text
-    .replace(/<(think|analysis|reasoning)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
-    .replace(/<(think|analysis|reasoning)\b[^>]*>[\s\S]*$/gi, '')
-    .trim();
-}
+/** 公开文本提取与异常格式校验由共享契约定义。 */
+import { extractPublicAnswer, answerFormatIssue } from '@journey/contracts';
+/** 保留现有纯函数入口供安全边界测试与调用者使用。 */
+export const publicAnswer = extractPublicAnswer;
 /** 服务只保存公开模型状态，不保存用户共享图状态。 */
 @Injectable()
 /** 每轮创建独立图、预算和工具包装，checkpointer由数据库隔离。 */
@@ -111,18 +101,19 @@ export class AgentService {
       /** 最终正文也复用MCP工具中心的同一个秘密清理边界。 */
       const safety = this.mcp.safety;
       /** 模型流标签区分主回答与子代理报告；禁用隐藏重试以便预算可追踪。 */
-      const model = (role: string) =>
+      const model = (role: string, maxTokens = env.AGENT_MAX_OUTPUT_TOKENS) =>
         new ChatOpenAI({
           /** 凭据只进入服务端模型实例，不放在公开事件中。 */
           apiKey: env.LLM_API_KEY,
           /** 具体模型由部署配置选择，浏览器不能覆盖。 */
           model: env.LLM_MODEL,
+          ...providerModelOptions(env.LLM_BASE_URL),
           /** 单次模型请求30秒，整轮另有AGENT_TIMEOUT_MS限制。 */
           timeout: 30000,
           /** 关闭SDK自动重试，防止实际请求数超出可追踪预算。 */
           maxRetries: 0,
-          /** 每次输出最多2048 tokens，约束费用与工具参数体积。 */
-          maxTokens: 2048,
+          /** 输出上限来自可信后端配置，避免完整行程被固定短上限截断。 */
+          maxTokens,
           /** 使用真实供应商SSE，由SDK组装文本和tool_calls。 */
           streaming: true,
           /** 主子模型标签决定哪些正文可以进入最终回答。 */
@@ -199,8 +190,15 @@ export class AgentService {
         tools: researchTools,
         systemPrompt: `${JOURNEY_SYSTEM_PROMPT}\n你是旅行研究子代理，只完成委派的一个子问题，返回事实、来源与缺失信息，不输出隐藏推理。`,
         middleware: [
-          executionMiddleware(env, budget, signal, publish, safety, 'researcher', (name) =>
-            selection.allows(name),
+          executionMiddleware(
+            env,
+            budget,
+            signal,
+            publish,
+            safety,
+            'researcher',
+            (name) => selection.allows(name),
+            (limit) => model('researcher', limit),
           ),
           textModelBoundary,
         ],
@@ -241,8 +239,15 @@ export class AgentService {
             ],
           }),
           /** 所有主代理模型/工具调用都经过同一个共享预算。 */
-          executionMiddleware(env, budget, signal, publish, safety, 'main', (name) =>
-            selection.allows(name),
+          executionMiddleware(
+            env,
+            budget,
+            signal,
+            publish,
+            safety,
+            'main',
+            (name) => selection.allows(name),
+            (limit) => model('main', limit),
           ),
           /** 文本消息投影保证主、子模型都遵循SDK消息结构。 */
           textModelBoundary,
@@ -256,63 +261,40 @@ export class AgentService {
         },
         ...input.messages,
       ];
-      let answered = false;
-      /** 使用真实SDK事件流，不转发原始事件中的prompt、reasoning或内部状态。 */
-      /** 每轮thread_id由可信ID构造；失败工具不会因刷新网页而自动重跑。 */
-      const stream = graph.streamEvents(
+      /** 工具进度仍实时发布；只读取经过所有中间件校验的最终图状态。 */
+      const completed = await graph.invoke(
         { messages },
         {
-          version: 'v2',
           signal,
           durability: 'sync',
           recursionLimit: 60,
-          configurable: {
-            thread_id: `${input.userId}:${input.conversationId}:${input.runId}`,
-          },
+          configurable: { thread_id: `${input.userId}:${input.conversationId}:${input.runId}` },
         },
       );
-      /** 模型中间草稿不冒充最终正文；确认无tool_calls的主回复后才发布。 */
-      for await (const event of stream) {
-        /** 每个事件到达时检查取消，不继续处理已被停止的运行。 */
-        signal.throwIfAborted();
-        /** 只消费主模型完成事件；其他内容由专用中间件公开摘要。 */
-        if (event.event !== 'on_chat_model_end' || !event.tags?.includes('journey:main')) continue;
-        /** 仅取正文与工具调用字段，不读取隐藏推理或原始prompt。 */
-        const output = event.data.output as {
-          /** 公开text内容与多模态块的判别入口。 */
-          content?: unknown;
-          /** SDK标准化后的结构化工具调用列表。 */
-          tool_calls?: unknown[];
-          /** 兼容服务可能把tool_calls保留在附加字段。 */
-          additional_kwargs?: {
-            /** 只检查是否还要执行工具，不向网页发送原始调用对象。 */
-            tool_calls?: unknown[];
-          };
-        };
-        /** 实际有模型响应后才标记最近一次连接成功。 */
-        this.modelConnected = true;
-        /** 仍有tool_calls时SDK会继续循环，这段草稿不是最终答案。 */
-        if (output.tool_calls?.length || output.additional_kwargs?.tool_calls?.length) continue;
-        /** 主答案也经过秘密值清理与UTF-8字节上限。 */
-        const answer = safety.text(publicAnswer(output.content), 32000);
-        /** 空答案不能冒充一次成功回答。 */
-        if (!answer) continue;
-        /** 只在确认有正文后记录成功输出。 */
-        answered = true;
-        /** 按Unicode字符拆块，避免中文与emoji被切成半个字符。 */
-        const characters = Array.from(answer);
-        /** 每块都等待持久化对话原子落库；没有模拟打字等待。 */
-        for (let index = 0; index < characters.length; index += 256)
-          await publish('message.delta', {
-            content: characters.slice(index, index + 256).join(''),
-          });
-      }
-      /** 不生成兜底假回答，空模型输出有明确失败码。 */
-      if (!answered)
+      signal.throwIfAborted();
+      /** 原始on_chat_model_end先于中间件完成，不能作为对用户发布正文的依据。 */
+      const output = completed.messages.at(-1);
+      if (!output || output.getType() !== 'ai')
+        throw new ExecutionError('MODEL_EMPTY_RESPONSE', '模型没有返回可展示正文，请重试');
+      const message = output as AIMessage;
+      if (message.tool_calls?.length || message.invalid_tool_calls?.length)
         throw new ExecutionError(
-          'MODEL_EMPTY_RESPONSE',
-          '模型没有返回可展示正文，请重试或检查模型兼容性',
+          'MODEL_INVALID_OUTPUT',
+          '模型工具调用格式异常，本轮未生成完整回答',
         );
+      const answer = safety.text(publicAnswer(message.content), 32000);
+      if (!answer)
+        throw new ExecutionError('MODEL_EMPTY_RESPONSE', '模型没有返回可展示正文，请重试');
+      if (answerFormatIssue(answer))
+        throw new ExecutionError(
+          'MODEL_INVALID_OUTPUT',
+          '模型返回格式异常，已拦截，请重试本轮问题',
+        );
+      this.modelConnected = true;
+      /** 按Unicode码点拆块，逐块等待持久化，保留中文与emoji完整性。 */
+      const characters = Array.from(answer);
+      for (let index = 0; index < characters.length; index += 256)
+        await publish('message.delta', { content: characters.slice(index, index + 256).join('') });
       await publish('run.progress', {
         title: '智能体编排 · 智能体执行完成',
         detail: `实际模型调用${budget.modelCalls}次，工具调用${budget.toolCalls}次，${budget.estimated ? '估算累计' : '供应商报告累计'}${budget.totalTokens} tokens。`,

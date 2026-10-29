@@ -1,5 +1,7 @@
 /** 使用 Markdown 解析器处理标题、列表、表格和代码块。 */
 import { marked } from 'marked';
+/** 已保存的旧异常正文也不能把内部协议标签直接显示给用户。 */
+import { answerForDisplay } from '@journey/contracts';
 /** 对解析后的 HTML 做允许列表净化，阻止外部内容注入脚本。 */
 import DOMPurify from 'dompurify';
 /** 按需注册少量语言，避免把所有高亮语言打进首屏。 */
@@ -56,7 +58,7 @@ export function renderMarkdown(source: string, headingPrefix?: string): string {
     return `<div class="table-shell">${table.call(this, token)}</div>`;
   };
   /** 限制单次渲染文本量，后续长报告将使用单独的文档组件。 */
-  const html = marked.parse(source.slice(0, 100000), {
+  const html = marked.parse(answerForDisplay(source).slice(0, 100000), {
     async: false,
     gfm: true,
     breaks: true,

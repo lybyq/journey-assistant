@@ -315,17 +315,24 @@ describe('持久化对话持久化运行验收', () => {
           );
           return saved.run?.status === 'completed';
         });
+        /** 模拟旧版本已经保存的坏回答，下一轮装配历史必须忽略它。 */
+        if (seen.length === 1)
+          await db.query(
+            "UPDATE messages SET content=$2 WHERE conversation_id=$1 AND role='assistant'",
+            [id, '<｜｜DSML｜｜ calls>LEGACY_BROKEN_ANSWER'],
+          );
       }
       expect(seen).toHaveLength(2);
       expect(seen[1]).toContain('ALICE_ONLY_MEMORY');
       expect(seen[1]).toContain('杭州');
       expect(seen[1]).toContain('driving');
+      expect(seen[1]).not.toContain('LEGACY_BROKEN_ANSWER');
       const rows = await db.query(
         'SELECT executor,prompt_version FROM runs WHERE conversation_id=$1',
         [id],
       );
       expect(
-        rows.rows.every((row) => row.executor === 'agent' && row.prompt_version === 'journey-v2.1'),
+        rows.rows.every((row) => row.executor === 'agent' && row.prompt_version === 'journey-v2.2'),
       ).toBe(true);
       expect(
         (

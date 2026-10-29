@@ -82,6 +82,8 @@ const environmentSchema = z.object({
   AGENT_MAX_MODEL_CALLS: z.coerce.number().int().min(1).max(30).default(12),
   AGENT_MAX_TOOL_CALLS: z.coerce.number().int().min(1).max(40).default(20),
   AGENT_MAX_TOKENS: z.coerce.number().int().min(1000).max(200000).default(50000),
+  /** 完整行程正文需要足够输出空间，截断响应仍须通过格式校验。 */
+  AGENT_MAX_OUTPUT_TOKENS: z.coerce.number().int().min(256).max(8192).default(4096),
   /** 只接受预置服务器，空值关闭外部工具。 */
   MCP_SERVERS: z
     .string()

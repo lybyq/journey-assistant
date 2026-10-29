@@ -5,6 +5,15 @@ import { describe, expect, it } from 'vitest';
 import { renderMarkdown } from '../apps/web/src/features/chat/markdown';
 /** 不可信供应商和用户文本必须经过相同安全渲染。 */
 describe('Markdown 安全边界', () => {
+  /** 已保存的历史坏回答也走网页真实渲染入口，不能仅修复新消息。 */
+  it('历史内部工具格式与转义HTML显示清晰提示', () => {
+    for (const text of ['<｜｜DSML｜｜ calls>内部工具参数', '&lt;div&gt;错误页面&lt;/div&gt;']) {
+      const html = renderMarkdown(text);
+      expect(html).toContain('异常的模型输出格式');
+      expect(html).not.toContain('DSML');
+      expect(html).not.toContain('&lt;div');
+    }
+  });
   /** 同页多条回答使用独立锚点，目录不能跳到其他回答或注入HTML属性。 */
   it('为真实标题生成独立且经过清理的章节锚点', () => {
     const first = renderMarkdown('## 行程\n\n### 预算', 'answer-one');

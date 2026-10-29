@@ -8,6 +8,8 @@ import { Check, Copy, BookOpen, ArrowUpRight, Sparkles } from 'lucide-vue-next';
 import { marked, type Tokens } from 'marked';
 /** 所有 Markdown 必须通过统一净化函数后才允许使用 v-html。 */
 import { renderMarkdown } from '@/features/chat/markdown';
+/** 目录、复制与正文必须使用相同的安全展示内容。 */
+import { answerForDisplay } from '@journey/contracts';
 /** 明确输入为普通字符串，组件不访问网络和模型 SDK。 */
 const props = defineProps<{ content: string; streaming: boolean }>();
 /** 每条回答拥有独立锚点，页面多个历史回答不会跳错章节。 */
@@ -26,7 +28,7 @@ const sections = computed(() =>
     .slice(0, 8),
 );
 /** 文字量属于阅读提示，不能冒充模型运行进度或报价完整率。 */
-const reading = computed(() => Math.max(1, Math.ceil(props.content.length / 500)));
+const reading = computed(() => Math.max(1, Math.ceil(renderedSource.value.length / 500)));
 /** 滚动限定在本条回答内；减少动态偏好时使用即时定位。 */
 function jump(id: string) {
   article.value?.querySelector(`[id="${id}"]`)?.scrollIntoView({
@@ -35,7 +37,7 @@ function jump(id: string) {
   });
 }
 /** 暂存已提交渲染的文本，限制每帧最多更新一次。 */
-const renderedSource = shallowRef(props.content);
+const renderedSource = shallowRef(answerForDisplay(props.content));
 /** 记录复制完成的短暂反馈。 */
 const copied = shallowRef(false);
 /** 剪贴板被禁用时给出可见失败提示，不假装操作成功。 */
@@ -49,7 +51,7 @@ watch(
   () => {
     cancelAnimationFrame(frame);
     frame = requestAnimationFrame(() => {
-      renderedSource.value = props.content;
+      renderedSource.value = answerForDisplay(props.content);
     });
   },
 );
@@ -59,7 +61,7 @@ const safeHtml = computed(() => renderMarkdown(renderedSource.value, prefix));
 async function copy(): Promise<void> {
   /** 剪贴板可能被权限策略禁用，需要明确给出操作结果。 */
   try {
-    await navigator.clipboard.writeText(props.content);
+    await navigator.clipboard.writeText(renderedSource.value);
     copied.value = true;
     copyFailed.value = false;
     clearTimeout(copyTimer);

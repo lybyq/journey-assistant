@@ -15,6 +15,7 @@ import {
   serverEventSchema,
   persistedRunSchema,
   conversationSnapshotSchema,
+  answerFormatIssue,
   type ServerEvent,
   type PersistedRun,
 } from '@journey/contracts';
@@ -389,6 +390,8 @@ export class RuntimeRepository {
     /** 按完整消息裁剪最多24000字符，最新用户输入总会保留。 */
     let characters = 0;
     const messages = history.rows
+      /** 旧版本误存的模型内部格式不再作为assistant历史污染后续问答；用户原文保留。 */
+      .filter((row) => row.role === 'user' || !answerFormatIssue(row.content))
       .filter((row) => {
         characters += row.content.length;
         return characters <= 24000;

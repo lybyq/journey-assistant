@@ -74,6 +74,8 @@ Vue 脚本沿用 JSDoc；模板使用合法 `<!-- ... -->`；CSS 使用 `/** ...
 
 身份与存储已读取并验证 `DATABASE_URL`、`REDIS_URL`、`STORAGE_ENABLED`、`AUTH_SECRET`、`REDIS_PREFIX`、`ACCESS_TOKEN_SECONDS` 和 `REFRESH_TOKEN_DAYS`。`pnpm storage:setup`生成不覆盖原文件的`.env.storage.local`，其优先级在原`.env`之前、进程环境之后。真实就绪状态见`/api/v1/system/storage`；未启用存储时返回disabled，身份接口明确不可用。
 
+智能体运行默认总时限120秒、累计50000 token、最多12次模型和20次工具调用；AGENT_MAX_OUTPUT_TOKENS默认4096（允许256～8192）。格式修复最多一次且计入同一运行预算，不自动重试真实外部工具。
+
 ## 网页环境变量
 
 | 名称              | 用途                                                               |

@@ -7,6 +7,7 @@ const domains = z.enum([
   'request',
   'research',
   'transport',
+  'rail_tools',
   'driving',
   'experiences',
   'tours',
@@ -48,11 +49,10 @@ export class ToolSelection {
     )
       return true;
     if (toolDomains[name]) return this.enabled.has(toolDomains[name]!);
-    if (name.startsWith('train__')) return this.enabled.has('transport');
+    if (name.startsWith('train__')) return this.enabled.has('rail_tools');
     if (name.startsWith('tavily__')) return this.enabled.has('research');
     if (name === 'amap__maps_weather') return this.enabled.has('weather');
-    if (name.startsWith('amap__'))
-      return ['maps', 'experiences', 'driving'].some((domain) => this.enabled.has(domain));
+    if (name.startsWith('amap__')) return this.enabled.has('maps');
     return false;
   }
   /** 工具名称与参数在实际LangChain循环中执行，下一次模型请求才看到新增Schema。 */
@@ -68,7 +68,7 @@ export class ToolSelection {
       {
         name: 'journey_tools_select',
         description:
-          '按需加载工具：request保存需求；research资料搜索；transport铁路航班；driving自驾；experiences地点酒店；tours跟团；budget录入用户估算；planning行程版本；weather天气；maps地图。一次最多选3种，普通问候无需调用。',
+          '按需加载：request保存需求；research资料；transport业务铁路航班；driving自驾；experiences业务地点酒店；tours跟团；budget用户估算；planning行程；weather天气。独立原始查询才选rail_tools铁路或maps地图；业务工具内部已接入MCP，不要重复加载。一次最多3种。',
         schema: z.object({ domains: z.array(domains).min(1).max(3) }).strict(),
       },
     );

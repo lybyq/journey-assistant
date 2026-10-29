@@ -62,6 +62,7 @@ function modelReply(
     args: unknown;
   },
   tokens = 50,
+  finishReason?: string,
 ): void {
   /** fixture明确与真实旅游答案区分，输出内容仅用于协议断言。 */
   response.writeHead(200, {
@@ -126,7 +127,7 @@ function modelReply(
         {
           index: 0,
           delta: {},
-          finish_reason: call ? 'tool_calls' : 'stop',
+          finish_reason: finishReason ?? (call ? 'tool_calls' : 'stop'),
         },
       ],
     })}\n\n`,
@@ -223,9 +224,43 @@ beforeAll(async () => {
       const called = messages
         .flatMap((message) => message.tool_calls ?? [])
         .map((call) => call.function.name);
+      /** 坏输出由真实模型SSE送入SDK，验证原始结束事件不会提前泄露正文。 */
+      if (joined.includes('TEST_SCENARIO:format-repair')) {
+        if (called.includes('journey_current_time'))
+          modelReply(response, '## 修复后的中文回答 🧭\n\n已读取真实时钟。');
+        else if (joined.includes('上次模型响应未通过输出格式校验'))
+          modelReply(response, '', { name: 'journey_current_time', args: {} });
+        else
+          modelReply(
+            response,
+            '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="journey_current_time">内部格式</｜｜DSML｜｜ invoke>',
+          );
+        return;
+      }
+      if (joined.includes('TEST_SCENARIO:format-always-invalid')) {
+        modelReply(response, '<｜｜DSML｜｜ calls>始终异常');
+        return;
+      }
+      if (
+        joined.includes('TEST_SCENARIO:html-repair') ||
+        joined.includes('TEST_SCENARIO:truncated-repair')
+      ) {
+        if (joined.includes('上次模型响应未通过输出格式校验'))
+          modelReply(response, '## 完整回答\n\n- 日期需要确认\n- 酒店报价尚未取得');
+        else if (joined.includes('TEST_SCENARIO:html-repair'))
+          modelReply(response, '<div><h2>HTML行程</h2></div>');
+        else modelReply(response, '## 行程\n\n尚未结束的列表', undefined, 50, 'length');
+        return;
+      }
       /** 模拟真实计费量较大的工具循环，最后一轮必须取消工具并生成正文。 */
       if (joined.includes('TEST_SCENARIO:reserve')) {
-        if (!called.includes('journey_current_time'))
+        if (
+          !called.includes('journey_current_time') &&
+          !messages.some(
+            (message) =>
+              message.role === 'user' && message.content.startsWith('以下是已执行工具的结果'),
+          )
+        )
           modelReply(response, '', { name: 'journey_current_time', args: {} }, 4500);
         else
           modelReply(response, '## 预算内的最终回答\n\n已根据真实工具结果完成。', undefined, 1000);
@@ -506,7 +541,7 @@ afterAll(async () => {
   await admin.query(`DROP DATABASE IF EXISTS ${databaseName} `);
   await admin.end();
 });
-/** 跨模块验收保持04决定流程、05负责工具执行的真实依赖方向。 */
+/** 集成验收保持模型编排与外部工具执行的单向依赖。 */
 describe('旅行服务真实SDK集成', () => {
   /** 一家服务故障不会阻止另一家就绪，连续失败才进入熔断，冷却后能重连。 */
   it('独立供应商故障、熔断与冷却重连生效', async () => {
@@ -751,6 +786,15 @@ describe('旅行服务真实SDK集成', () => {
     );
     expect(modelRequests.length - before).toBe(2);
     expect((modelRequests.at(-1)!.tools as unknown[] | undefined)?.length ?? 0).toBe(0);
+    expect(modelRequests.at(-1)!.max_tokens).toBe(1500);
+    const finalMessages = modelRequests.at(-1)!.messages as {
+      role: string;
+      tool_calls?: unknown[];
+    }[];
+    expect(
+      finalMessages.some((message) => message.role === 'tool' || message.tool_calls?.length),
+    ).toBe(false);
+    expect(JSON.stringify(finalMessages)).toContain('以下是已执行工具的结果');
     expect(
       probe.events
         .filter((event) => event.type === 'message.delta')
@@ -835,4 +879,63 @@ describe('旅行服务真实SDK集成', () => {
     expect(JSON.stringify(probe.events)).not.toContain('should-never-expose');
   });
   /** 结束真实SDK跨模块验收。 */
+  /** 格式重试后仍经原生工具执行，绝不解析DSML为工具或输出两份回答。 */
+  it('内部工具标记被拦截并通过一次格式修复恢复原生调用', async () => {
+    const before = modelRequests.length;
+    const probe = capture();
+    await new AgentService(config, service, checkpoints).execute(
+      input('format-repair'),
+      new AbortController().signal,
+      probe.publish,
+    );
+    const answer = probe.events
+      .filter((event) => event.type === 'message.delta')
+      .map((event) => event.payload.content)
+      .join('');
+    expect(answer).toBe('## 修复后的中文回答 🧭\n\n已读取真实时钟。');
+    expect(modelRequests.length - before).toBe(3);
+    expect(
+      probe.events.filter(
+        (event) => event.type === 'tool.started' && event.payload.name === 'journey_current_time',
+      ),
+    ).toHaveLength(1);
+    expect(
+      probe.events.filter(
+        (event) => event.type === 'agent.step' && event.payload.stage === 'model.completed',
+      ),
+    ).toHaveLength(3);
+  });
+  /** 不可修复的供应商响应明确失败，不能把协议标签持久化为成功回答。 */
+  it('持续坏格式最多修复一次且不发布正文', async () => {
+    const before = modelRequests.length;
+    const probe = capture();
+    await expect(
+      new AgentService(config, service, checkpoints).execute(
+        input('format-always-invalid'),
+        new AbortController().signal,
+        probe.publish,
+      ),
+    ).rejects.toMatchObject({ code: 'MODEL_INVALID_OUTPUT' });
+    expect(modelRequests.length - before).toBe(2);
+    expect(
+      probe.events.filter(
+        (event) => event.type === 'message.delta' || event.type === 'tool.started',
+      ),
+    ).toHaveLength(0);
+  });
+  /** 页面格式和输出截断都需要重新生成完整Markdown，不能仅在浏览器隐藏标签。 */
+  it.each(['html-repair', 'truncated-repair'])('修复异常输出：%s', async (scenario) => {
+    const probe = capture();
+    await new AgentService(config, service, checkpoints).execute(
+      input(scenario),
+      new AbortController().signal,
+      probe.publish,
+    );
+    expect(
+      probe.events
+        .filter((event) => event.type === 'message.delta')
+        .map((event) => event.payload.content)
+        .join(''),
+    ).toBe('## 完整回答\n\n- 日期需要确认\n- 酒店报价尚未取得');
+  });
 });

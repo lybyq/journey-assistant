@@ -1,3 +1,23 @@
+/** 上车日取查询日期；社区包的start_date来自列车始发日，不能用于沿途上车日期。 */
+export function railTimes(
+  date: string,
+  time: unknown,
+  duration: unknown,
+): { departure: string | null; arrival: string | null } {
+  const match = typeof time === 'string' ? time.match(/^(\d{2}):(\d{2})$/) : null;
+  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59)
+    return { departure: null, arrival: null };
+  const departure = date + 'T' + time + ':00+08:00';
+  const minutes = durationMinutes(duration);
+  const wall = Date.parse(date + 'T' + time + ':00Z');
+  return {
+    departure,
+    arrival:
+      minutes === null
+        ? null
+        : new Date(wall + minutes * 60000).toISOString().slice(0, 19) + '+08:00',
+  };
+}
 /** 车次、航班与门到门接驳使用标准化结果，不直接渲染供应商JSON。 */
 import { BadRequestException, Injectable } from '@nestjs/common';
 /** 每个查询选项有不可猜测ID，不能用车次名称跨项目引用。 */
@@ -51,6 +71,7 @@ export class TransportService {
     revision: number,
     input: ReturnType<typeof railQuerySchema.parse>,
     signal: AbortSignal,
+    planning = false,
   ) {
     /** 查询日期范围是清晰的日历窗口；实际售票仍以铁路返回为准。 */
     const workspace = await this.repository.get(userId, id);
@@ -87,12 +108,22 @@ export class TransportService {
         fromStation: from,
         toStation: to,
         format: 'json',
-        limitedNum: exactOrigin || exactDestination ? 40 : 4,
-        sortFlag: 'duration',
+        limitedNum: 40,
+        sortFlag: exactOrigin || exactDestination ? 'duration' : 'startTime',
+        ...(!exactOrigin && !exactDestination
+          ? {
+              earliestStartTime: planning
+                ? input.origin === workspace.document.request.destination
+                  ? 16
+                  : 7
+                : 6,
+              latestStartTime: 23,
+            }
+          : {}),
       },
     );
     const records = asRecords(raw);
-    const tickets = input.interline
+    let tickets = input.interline
       ? records
       : records.filter(
           (ticket) =>
@@ -105,6 +136,23 @@ export class TransportService {
                 ? ticket.to_station_telecode === to
                 : String(ticket.to_station ?? '').replace(/站$/, '') === destinationName)),
         );
+    /** 城市查询优先城市同名站，再参考耗时；有限样本不代表所有可行车站。 */
+    if (!exactOrigin && !exactDestination && !input.interline) {
+      const stationScore = (station: unknown, city: string) =>
+        String(station ?? '').replace(/站$/, '') === city
+          ? 0
+          : String(station ?? '').startsWith(city)
+            ? 1
+            : 2;
+      tickets = [...tickets].sort(
+        (a, b) =>
+          stationScore(a.from_station, originName) +
+            stationScore(a.to_station, destinationName) -
+            stationScore(b.from_station, originName) -
+            stationScore(b.to_station, destinationName) ||
+          (durationMinutes(a.lishi) ?? 9999) - (durationMinutes(b.lishi) ?? 9999),
+      );
+    }
     if (!tickets.length)
       throw new BadRequestException(
         records.length
@@ -154,9 +202,12 @@ export class TransportService {
           },
           notes: '查询到的成人票面参考价；儿童票、起售时点和最终出票需要核实。尚未包含接驳费用。',
         };
+        const times = railTimes(input.date, ticket.start_time, ticket.lishi);
         return transportOptionSchema.parse({
           id: optionId,
           mode: 'rail',
+          queryOrigin: input.origin,
+          queryDestination: input.destination,
           label: String(
             ticket.start_train_code ??
               legs.map((leg) => leg.start_train_code).join('→') ??
@@ -164,13 +215,8 @@ export class TransportService {
           ),
           origin: String(ticket.from_station ?? ticket.from_station_name ?? input.origin),
           destination: String(ticket.to_station ?? ticket.end_station_name ?? input.destination),
-          departure: ticket.start_time
-            ? `${ticket.start_date ?? input.date}T${ticket.start_time}:00+08:00`
-            : null,
-          arrival:
-            ticket.arrive_date && ticket.arrive_time
-              ? `${ticket.arrive_date}T${ticket.arrive_time}:00+08:00`
-              : null,
+          departure: times.departure,
+          arrival: times.arrival,
           durationMinutes: durationMinutes(ticket.lishi),
           accessMinutes: input.accessMinutes,
           bufferMinutes: input.bufferMinutes,

@@ -34,6 +34,8 @@ import ConversationList from '@/components/identity/ConversationList.vue';
 /** 聊天传输与身份存储分离，生产流绑定当前用户与会话。 */
 import { useChatSession } from '@/features/chat/use-chat-session';
 /** 用户数据通过单一仓库与服务端交互。 */
+import JourneyDecisionBoard from '@/components/domestic/JourneyDecisionBoard.vue';
+import { useDomesticDecision } from '@/features/domestic/use-domestic-decision';
 import { useIdentityStore } from '@/stores/identity';
 /** 明确三种真实可用视图，不渲染虚假页面。 */
 const activeView = shallowRef<'workspace' | 'roadmap' | 'account' | 'travel'>('workspace');
@@ -63,6 +65,21 @@ const {
   submitting,
   error: chatError,
 } = useChatSession();
+/** 对话终态后加载持久化方案，浏览与问答可随时切换。 */
+const domestic = useDomesticDecision(() => chat.state.status);
+const canvas = shallowRef<'chat' | 'plans'>('chat');
+watch(
+  () => domestic.decision.value?.optionSet?.id,
+  (id) => {
+    if (id) canvas.value = 'plans';
+  },
+);
+watch(
+  () => identity.selectedId,
+  () => {
+    canvas.value = 'chat';
+  },
+);
 /** 当前会话名称由已验证列表派生，不在模板反复搜索。 */
 const selectedTitle = computed(
   () =>
@@ -243,6 +260,7 @@ onMounted(() => {
             @click="inspectorOpen = !inspectorOpen"
           >
             <Activity :size="16" />
+            <span>执行记录</span>
           </button>
           <!-- 结束顶栏操作。 -->
         </div>
@@ -307,13 +325,63 @@ onMounted(() => {
             <p v-if="identity.selectedId" class="conversation-scope">
               需求、路线、预算都可以接着聊；展开执行记录查看工具与来源。
             </p>
+            <div
+              v-if="domestic.decision.value?.optionSet"
+              class="canvas-tabs"
+              aria-label="工作区视图"
+            >
+              <button
+                type="button"
+                :class="{ active: canvas === 'plans' }"
+                @click="canvas = 'plans'"
+              >
+                方案画布
+              </button>
+              <button type="button" :class="{ active: canvas === 'chat' }" @click="canvas = 'chat'">
+                对话与过程
+              </button>
+              <button type="button" :disabled="domestic.loading.value" @click="domestic.refresh">
+                刷新方案
+              </button>
+            </div>
+            <p v-if="domestic.error.value" class="decision-error" role="alert">
+              {{ domestic.error.value }}
+              <button type="button" @click="domestic.refresh">重试</button>
+            </p>
+            <div
+              v-if="canvas === 'plans' && domestic.decision.value?.optionSet"
+              class="decision-scroll"
+            >
+              <JourneyDecisionBoard
+                :decision="domestic.decision.value"
+                :providers="domestic.providers.value"
+                :busy="domestic.busy.value || chat.busy"
+                @select="domestic.select"
+                @open="domestic.openProvider"
+                @adjust="
+                  (message) => {
+                    draft = message;
+                    canvas = 'chat';
+                  }
+                "
+              />
+              <p v-if="domestic.handoff.value" class="handoff-notice">
+                {{ domestic.handoff.value.notice }}
+                <a :href="domestic.handoff.value.url" target="_blank" rel="noopener noreferrer">
+                  打开{{ domestic.handoff.value.label }} ↗
+                </a>
+              </p>
+            </div>
             <!-- 欢迎示例只填写草稿。 -->
-            <div v-if="chat.state.status === 'idle' && !history.length" class="welcome-scroll">
+            <div
+              v-if="canvas === 'chat' && chat.state.status === 'idle' && !history.length"
+              class="welcome-scroll"
+            >
               <WelcomePanel @choose="draft = $event" />
             </div>
             <!-- 回答仍由真实服务事件驱动。 -->
             <ChatThread
-              v-else
+              v-else-if="canvas === 'chat'"
               :state="chat.state"
               :history="history"
               :has-more="Boolean(nextCursor)"
@@ -334,6 +402,7 @@ onMounted(() => {
               :preferred-mode="identity.profile?.preferredMode"
               @submit="
                 async (message) => {
+                  canvas = 'chat';
                   if (await submit(message)) draft = '';
                 }
               "
@@ -345,7 +414,7 @@ onMounted(() => {
         </section>
         <!-- 轨迹只显示公开步骤与脱敏结果。 -->
         <ExecutionPanel
-          v-if="activeView === 'workspace'"
+          v-if="activeView === 'workspace' && inspectorOpen"
           :state="chat.state"
           :health="health"
           :mobile-open="inspectorOpen"
@@ -717,6 +786,68 @@ onMounted(() => {
   .workspace-heading {
     font-size: 12px;
     margin-bottom: 10px;
+  }
+}
+
+/* 方案画布占据主内容空间；问答与底部输入维持独立滚动。 */
+.canvas-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 0 0 12px;
+  flex-shrink: 0;
+}
+.canvas-tabs button {
+  border: 1px solid transparent;
+  border-radius: 24px;
+  background: transparent;
+  color: #82907b;
+  padding: 10px 18px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.canvas-tabs button.active {
+  background: #e7efe1;
+  color: #315a3c;
+  border-color: #dae5d2;
+}
+.canvas-tabs button:last-child {
+  margin-left: auto;
+  font-size: 12px;
+}
+.decision-scroll {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+  padding-right: 8px;
+}
+.decision-error,
+.handoff-notice {
+  font-size: 13px;
+  color: #927845;
+  background: #faf2e1;
+  padding: 13px;
+  border-radius: 9px;
+  line-height: 1.8;
+}
+.handoff-notice a {
+  color: #346e47;
+  text-decoration: underline;
+}
+/** 桌面也按需打开轨迹，把默认空间交给方案本身。 */
+.inspect-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  width: auto;
+  white-space: nowrap;
+  padding: 7px 9px;
+  color: var(--forest);
+}
+@media (max-width: 760px) {
+  .inspect-toggle > span {
+    display: none;
   }
 }
 </style>

@@ -39,8 +39,12 @@ const sendable = computed(
     props.connected && !props.busy && draft.value.trim().length > 0 && draft.value.length <= 1800,
 );
 /** 发送时附带偏好，输入内容仍保留直到用户主动新建对话。 */
-function submit(): void {
-  if (sendable.value) emit('submit', `出行偏好：${mode.value}。${draft.value.trim()}`);
+function submit(arrange = false): void {
+  if (sendable.value)
+    emit(
+      'submit',
+      `出行偏好：${mode.value}。${arrange ? '请一键安排完整的国内旅行，给我不同真实方案选择。' : ''}${draft.value.trim()}`,
+    );
 }
 /** Enter 发送，Shift+Enter 换行；中文输入法确认候选时不能误发送。 */
 function onKeydown(event: KeyboardEvent): void {
@@ -56,7 +60,7 @@ function onKeydown(event: KeyboardEvent): void {
   <!-- 输入区域固定在工作区底部，但不遮挡聊天滚动内容。 -->
   <div class="composer-wrap">
     <!-- 主输入表单仅有一个主要动作。 -->
-    <form class="composer" @submit.prevent="submit">
+    <form class="composer" @submit.prevent="submit()">
       <!-- 真实可用的偏好选择，按下状态对辅助技术可见。 -->
       <div class="mode-list" aria-label="出行偏好">
         <button
@@ -77,7 +81,7 @@ function onKeydown(event: KeyboardEvent): void {
       <textarea
         v-model="draft"
         aria-label="描述你的旅行需求"
-        placeholder="想去哪里、和谁一起、预算多少？把你的旅行想法告诉我…"
+        placeholder="目的地、日期、人数、预算…"
         :disabled="busy"
         maxlength="1800"
         rows="2"
@@ -85,7 +89,16 @@ function onKeydown(event: KeyboardEvent): void {
       ></textarea>
       <!-- 底部明确当前运行范围，避免框架诊断被误认作真实报价。 -->
       <div class="composer-actions">
-        <span>旅行问答 · 工具与来源</span>
+        <span>免费规划 · 自主预订</span>
+        <button
+          v-if="!busy"
+          class="arrange-button"
+          type="button"
+          :disabled="!sendable"
+          @click="submit(true)"
+        >
+          一键安排 ↗
+        </button>
         <button
           v-if="busy"
           type="button"
@@ -314,5 +327,41 @@ textarea::placeholder {
     font-size: 12px;
     padding: 6px 9px;
   }
+}
+
+/* 一键安排与普通发送分开，避免问候也被当成完整旅行任务。 */
+.arrange-button {
+  margin-left: auto;
+  padding: 9px 17px;
+  background: #24573c;
+  border: 0;
+  border-radius: 22px;
+  font-size: 13px;
+  color: white;
+  cursor: pointer;
+}
+.arrange-button:disabled {
+  opacity: 1;
+  background: #e7ede2;
+  color: #7b8a75;
+  cursor: default;
+}
+/** 空闲输入收紧，为行程与回答让出空间；聚焦后恢复编辑高度。 */
+.composer-wrap {
+  max-width: 1200px;
+  flex-shrink: 0;
+}
+.composer textarea {
+  height: 44px;
+  min-height: 44px;
+  resize: none;
+  transition: min-height 0.15s;
+}
+.composer:focus-within textarea {
+  height: 78px;
+  min-height: 78px;
+}
+.composer-footnote {
+  margin: 6px 0 0;
 }
 </style>

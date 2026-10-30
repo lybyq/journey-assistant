@@ -1,4 +1,9 @@
 /** 真实Nest/HTTP/PostgreSQL/Redis验证归属、报价、版本与分享。 */
+import {
+  domesticDecisionSchema,
+  domesticHandoffSchema,
+  domesticProviderSchema,
+} from '@journey/contracts';
 import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 /** 每轮独立数据库、命名空间与签名密钥。 */
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
@@ -512,6 +517,124 @@ describe('旅行服务生产HTTP链路', () => {
     expect(metrics.windowHours).toBe(24);
     expect(metrics.operations.some((row: any) => row.status === 'failed')).toBe(true);
     const migrations = await db.query('SELECT name FROM journey_migrations');
-    expect(migrations.rows).toHaveLength(6);
+    expect(migrations.rows).toHaveLength(7);
+  });
+});
+
+/** 在原有归属/版本链路上验证新增集合，不依赖商业平台或真实网络。 */
+describe('国内方案与预订交接HTTP边界', () => {
+  let choiceId = '';
+  it('保存真实地点候选的方案集合，生成不替用户选定，集合可恢复', async () => {
+    const before = trip.activeVersionId;
+    const response = await request(`/trips/${trip.id}/domestic/options`, {
+      revision: trip.revision,
+    });
+    expect(response.status).toBe(201);
+    const decision = domesticDecisionSchema.parse(await response.json());
+    expect(decision.optionSet?.options).toHaveLength(1);
+    expect(decision.stale).toBe(false);
+    expect(decision.workspace?.activeVersionId).toBe(before);
+    choiceId = decision.optionSet!.options[0]!.version.id;
+    trip = decision.workspace!;
+    expect(
+      (await request(`/trips/${trip.id}/domestic/options`, undefined, bob.accessToken)).status,
+    ).toBe(404);
+    const saved = domesticDecisionSchema.parse(
+      await (await request(`/trips/${trip.id}/domestic/options`)).json(),
+    );
+    expect(saved.optionSet?.options[0]?.version.id).toBe(choiceId);
+  });
+  it('选择用当前修订号，拒绝跨集合ID并使需求变更后的集合失效', async () => {
+    expect(
+      (
+        await request(`/trips/${trip.id}/domestic/options/${randomUUID()}/select`, {
+          revision: trip.revision,
+        })
+      ).status,
+    ).toBe(400);
+    const selected = await request(`/trips/${trip.id}/domestic/options/${choiceId}/select`, {
+      revision: trip.revision,
+    });
+    expect(selected.status).toBe(201);
+    trip = domesticDecisionSchema.parse(await selected.json()).workspace!;
+    expect(trip.activeVersionId).toBe(choiceId);
+    await update('', { revision: trip.revision, request: { pace: 'relaxed' } }, 'PATCH');
+    expect(
+      domesticDecisionSchema.parse(
+        await (await request(`/trips/${trip.id}/domestic/options`)).json(),
+      ).stale,
+    ).toBe(true);
+    expect(
+      (
+        await request(`/trips/${trip.id}/domestic/options/${choiceId}/select`, {
+          revision: trip.revision,
+        })
+      ).status,
+    ).toBe(409);
+  });
+  it('交接只生成固定消费者入口，拒绝原型键、任意URL与越权，点击不是订单', async () => {
+    for (const providerId of ['constructor', 'toString', '__proto__', 'https://evil.example'])
+      expect((await request(`/trips/${trip.id}/domestic/handoff`, { providerId })).status).toBe(
+        400,
+      );
+    expect(
+      (
+        await request(`/trips/${trip.id}/domestic/handoff`, {
+          providerId: 'railway',
+          url: 'https://evil.example',
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await request(
+          `/trips/${trip.id}/domestic/handoff`,
+          { providerId: 'railway' },
+          bob.accessToken,
+        )
+      ).status,
+    ).toBe(404);
+    const result = domesticHandoffSchema.parse(
+      await (await request(`/trips/${trip.id}/domestic/handoff`, { providerId: 'railway' })).json(),
+    );
+    expect(new URL(result.url).hostname).toBe('www.12306.cn');
+    expect(result.bookingConfirmed).toBe(false);
+    expect(result.kind).toBe('official_entry');
+    expect(
+      (
+        await db.query(
+          "SELECT id FROM audit_events WHERE user_id=$1 AND target_id=$2 AND action='travel.handoff'",
+          [alice.user.id, trip.id],
+        )
+      ).rowCount,
+    ).toBe(1);
+  });
+  it('渠道目录把未接入商业库存明确列为待合作，普通入口不伪装库存', async () => {
+    const providers = domesticProviderSchema
+      .array()
+      .parse(await (await request('/travel/domestic/providers')).json());
+    expect(providers.find((provider) => provider.id === 'meituan')).toMatchObject({
+      implemented: false,
+      state: 'partner_required',
+    });
+    expect(providers.find((provider) => provider.id === 'railway')?.capabilities).not.toContain(
+      'order',
+    );
+  });
+  it('报价过期窗口会使集合失效，即使需求文档未变化', async () => {
+    const response = await request(`/trips/${trip.id}/domestic/options`, {
+      revision: trip.revision,
+    });
+    expect(response.status).toBe(201);
+    const decision = domesticDecisionSchema.parse(await response.json());
+    trip = decision.workspace!;
+    await db.query(
+      "UPDATE trip_option_sets SET payload=jsonb_set(payload,'{createdAt}',to_jsonb($2::text)) WHERE id=$1",
+      [decision.optionSet!.id, new Date(Date.now() - 16 * 60000).toISOString()],
+    );
+    const expired = domesticDecisionSchema.parse(
+      await (await request(`/trips/${trip.id}/domestic/options`)).json(),
+    );
+    expect(expired.stale).toBe(true);
   });
 });

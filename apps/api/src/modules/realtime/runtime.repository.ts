@@ -484,12 +484,33 @@ export class RuntimeRepository {
       [run.user_id],
     );
     const value = profile.rows[0];
+    /** 双重归属查询只带回需求及当前方案引用，不展开整份候选或私人认证数据。 */
+    const travel = await this.storage.sql.query(
+      `SELECT p.id,p.revision,p.document->'request' AS request,p.active_version_id,(SELECT payload FROM trip_option_sets s WHERE s.trip_id=p.id AND s.user_id=p.user_id ORDER BY created_at DESC,id DESC LIMIT 1) AS choices FROM trip_projects p WHERE p.user_id=$1 AND p.conversation_id=$2 AND NOT p.archived ORDER BY p.updated_at DESC LIMIT 1`,
+      [run.user_id, run.conversation_id],
+    );
+    const project = travel.rows[0];
+    const travelContext = project
+      ? {
+          id: project.id,
+          revision: project.revision,
+          request: project.request,
+          activeVersionId: project.active_version_id,
+          options: project.choices?.options?.map((option: any) => ({
+            label: option.label,
+            versionId: option.version.id,
+            status: option.version.status,
+          })),
+          notice: '方案是否仍适用须由journey_arrange核对最新需求与候选。',
+        }
+      : null;
     /** 只返回执行器需要的字段，不包含登录令牌或密码摘要。 */
     return {
       runId,
       userId: run.user_id,
       conversationId: run.conversation_id,
       messages,
+      travelContext,
       ...(run.final_answer
         ? {
             delivery: {

@@ -29,6 +29,8 @@ export interface AgentInput {
     content: string;
   }[];
   /** 偏好是数据，不能提升为指令权限。 */
+  /** 当前会话项目的结构化事实，避免只依赖截断的聊天历史。 */
+  travelContext?: unknown;
   profile: {
     /** 用户保存的常住城市，仍可能与本次出发地不同。 */
     homeCity: string;

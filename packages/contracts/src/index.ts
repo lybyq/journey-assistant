@@ -286,3 +286,6 @@ export const serverEventSchema = z.discriminatedUnion('type', [
 ]);
 /** 推导跨应用的事件类型，消费方可依据 type 获得精确 payload。 */
 export type ServerEvent = z.infer<typeof serverEventSchema>;
+
+/** 国内决策工作台与商品渠道使用统一契约。 */
+export * from './domestic-planning.js';

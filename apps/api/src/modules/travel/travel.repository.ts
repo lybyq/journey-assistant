@@ -221,6 +221,8 @@ export class TravelRepository {
     id: string,
     revision: number,
     build: (version: number) => PlanVersion,
+    /** 比较候选只落版本，不替用户切换选中方案。 */
+    activate = true,
   ): Promise<PlanVersion> {
     return this.transaction(async (client) => {
       const row = await this.own(client, userId, id, true);
@@ -239,7 +241,7 @@ export class TravelRepository {
       );
       await client.query(
         'UPDATE trip_projects SET active_version_id=$2,revision=revision+1,updated_at=now() WHERE id=$1',
-        [id, version.id],
+        [id, activate ? version.id : row.active_version_id],
       );
       await this.audit(client, userId, 'trip.version_saved', id);
       return version;

@@ -90,7 +90,7 @@ export function validatePlan(
   );
   /** 自驾车辆费用承担本次交通，不应要求再虚构一张火车票才能比较。 */
   if (covered.has('driving')) covered.add('transport');
-  for (const category of ['transport', 'meal', ...(request.nights ? 'lodging' : [])])
+  for (const category of ['transport', 'meal', ...(request.nights ? ['lodging'] : [])])
     if (!covered.has(category as 'transport'))
       add('MISSING_COST_CATEGORY', `未覆盖${category}费用，不能比较完整出行总价`, 'warning');
   /** 模式能力必须有真实候选依据，不能只改显示方式就宣称已完成规划。 */

@@ -297,7 +297,7 @@ onUnmounted(() => cancelAnimationFrame(frame));
   padding-top: 18px;
 }
 .message {
-  max-width: 880px;
+  max-width: 1120px;
   gap: 15px;
   margin-bottom: 34px;
 }

@@ -44,6 +44,8 @@ export class ToolSelection {
         'journey_trip_read',
         'journey_capabilities',
         'journey_budget',
+        'journey_arrange',
+        'journey_option_select',
         'journey_current_time',
         'write_todos',
       ].includes(name)

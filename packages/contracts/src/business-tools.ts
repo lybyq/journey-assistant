@@ -11,6 +11,8 @@ export const BUSINESS_TOOL_DOMAINS = {
   journey_places: '地点查询',
   journey_hotels: '住宿报价',
   journey_tours: '旅行团',
+  journey_arrange: '一键安排',
+  journey_option_select: '选择方案',
   journey_budget: '预算计算',
   journey_estimate_add: '费用估算',
   journey_plan_generate: '行程编排',

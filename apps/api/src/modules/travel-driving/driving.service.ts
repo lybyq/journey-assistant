@@ -36,6 +36,88 @@ export class DrivingService {
     private readonly repository: TravelRepository,
     private readonly mcp: TravelMcpService,
   ) {}
+  /** 未提供车辆能耗时先保存真实路线，所有费用保持未知，不能以零元假设启动成本计算。 */
+  async preview(
+    userId: string,
+    id: string,
+    revision: number,
+    origin: GeoPoint,
+    destination: GeoPoint,
+    signal: AbortSignal,
+  ) {
+    const workspace = await this.repository.get(userId, id);
+    const request = workspace.document.request;
+    if (request.vehicles === null) throw new BadRequestException('请先确认车辆数量');
+    const call = await this.mcp.session(signal);
+    const data = asRecord(
+      await call('amap__maps_direction_driving', {
+        origin: origin.lng + ',' + origin.lat,
+        destination: destination.lng + ',' + destination.lat,
+      }),
+    );
+    const route = asRecord(data.route ?? asRecord(data.data).route ?? data);
+    const path = asRecords(route.paths)[0];
+    const distance = Number(path?.distance),
+      seconds = Number(path?.duration ?? asRecord(path?.cost).duration);
+    if (!Number.isFinite(distance) || distance < 0 || !Number.isFinite(seconds) || seconds < 0)
+      throw new BadRequestException('高德未返回有效自驾距离或时间');
+    const minutes = Math.ceil(seconds / 60),
+      rest = Math.max(0, Math.ceil(minutes / 120) - 1) * 20;
+    const routeId = randomUUID(),
+      now = new Date().toISOString();
+    const costs: CostItem[] = ['能源费', '过路费', '停车费', '租车费', '车辆保险'].map(
+      (label, index) => ({
+        id: randomUUID(),
+        label,
+        category: 'driving',
+        scopeKey: 'driving:' + routeId + ':' + index,
+        priceType: 'unknown',
+        unitAmountMinor: null,
+        currency: 'CNY',
+        quantity: request.vehicles!,
+        unit: 'vehicle',
+        required: true,
+        selected: true,
+        includes: [],
+        provenance: 'calculation',
+        provider: '高德路线；车辆费用待确认',
+        sourceUrl: null,
+        evidenceIds: [],
+        checkedAt: now,
+        validUntil: null,
+        conditions: requestConditions(request),
+        notes: '仅查询路线；能耗、能源单价和车辆费用尚未提供，不按零元计算。',
+      }),
+    );
+    const result = drivingRouteSchema.parse({
+      id: routeId,
+      origin,
+      destination,
+      waypoints: [],
+      distanceMeters: Math.round(distance),
+      driveMinutes: minutes,
+      restMinutes: rest,
+      chargingMinutes: 0,
+      totalMinutes: minutes + rest,
+      energyMinor: null,
+      knownVehicleMinor: 0,
+      unknownCosts: costs.map((cost) => cost.label),
+      perPersonMinor: null,
+      checkedAt: now,
+      assumptions: [
+        '起终点为用户城市地理编码中心，非精确门到门地址。',
+        '每驾驶120分钟预留20分钟休息，是规划假设，充电时间待确认。',
+      ],
+      warnings: ['全部车辆费用未知；路线为查询时参考，实际起终点、路况与充电需核对。'],
+      path: [],
+      costs,
+    });
+    return this.repository.mutate(userId, id, revision, (doc) => {
+      doc.driving.push(result);
+      doc.costs.push(...costs);
+      return doc;
+    });
+  }
   /** 每条途经路段单独查询，调用次数被最多5个途经点硬限制。 */
   async query(
     userId: string,

@@ -577,4 +577,12 @@ pre {
   }
 }
 /** 结束执行面板样式。 */
+/** 各尺寸都能直接关闭已打开的轨迹面板。 */
+.mobile-close {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
 </style>

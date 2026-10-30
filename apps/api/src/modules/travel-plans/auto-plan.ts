@@ -90,13 +90,22 @@ export function buildAutoPlan(
       continue;
     }
     day.items.push(
-      activity(option.label, 'transit', start, end, {
-        referenceId: option.id,
-        evidenceIds: option.evidenceIds,
-        costIds: option.quote ? [option.quote.id] : [],
-        travelBeforeMinutes: 0,
-        notes: `真实交通${option.durationMinutes}分钟，接驳${option.accessMinutes}、候车缓冲${option.bufferMinutes}、离站${option.egressMinutes}分钟；${option.notes}`,
-      }),
+      activity(
+        `${option.label} · ${option.origin}→${option.destination} · ${option.seatType ?? '席别待核实'}`.slice(
+          0,
+          300,
+        ),
+        'transit',
+        start,
+        end,
+        {
+          referenceId: option.id,
+          evidenceIds: option.evidenceIds,
+          costIds: option.quote ? [option.quote.id] : [],
+          travelBeforeMinutes: 0,
+          notes: `班次当地时刻${option.departure?.slice(11, 16)}—${option.arrival?.slice(11, 16) ?? '待核实'}，车上历时${option.durationMinutes}分钟；进站接驳${option.accessMinutes}、候车缓冲${option.bufferMinutes}、离站${option.egressMinutes}分钟均为规划预留，接驳仍需核实。${option.notes}`,
+        },
+      ),
     );
   }
   /** 自驾按真实总驾驶分钟拆段，每段最多120分钟，实际休息和充电单独占时。 */
@@ -191,14 +200,37 @@ export function buildAutoPlan(
   for (const [index, day] of days.entries()) {
     /** 跟团时不额外塞入自由行景点，避免与供应商日程重叠。 */
     if (input.mode !== 'group') {
-      let cursor = Math.max(9 * 60, ...day.items.map((item) => item.endMinute + 30));
-      const slots = request.pace === 'relaxed' ? 2 : 3;
+      /** 返程是当天不可移动的结束边界，不能把晚班车结束时间当作游玩起点。 */
+      const returns = day.items.filter(
+        (item) =>
+          item.kind === 'transit' &&
+          document.transport.some(
+            (option) =>
+              option.id === item.referenceId &&
+              (option.queryOrigin ?? option.origin).includes(request.destination ?? '') &&
+              (option.queryDestination ?? option.destination).includes(request.origin ?? ''),
+          ),
+      );
+      const latest = Math.min(18 * 60, ...returns.map((item) => item.startMinute - 30));
+      let cursor = Math.max(
+        9 * 60,
+        ...day.items.filter((item) => !returns.includes(item)).map((item) => item.endMinute + 30),
+      );
+      const slots = Math.min(
+        request.pace === 'relaxed' ? 2 : 3,
+        Math.ceil(remaining.length / (days.length - index)),
+      );
       for (let slot = 0; slot < slots && remaining.length; slot++) {
-        remaining.sort((a, b) =>
-          previous && a.point && b.point
-            ? distanceLowerBound(previous, a.point) - distanceLowerBound(previous, b.point)
-            : 0,
-        );
+        remaining.sort((a, b) => {
+          const mandatory = (name: string) =>
+            request.mustVisit.some((required) => name.includes(required));
+          return (
+            Number(mandatory(b.name)) - Number(mandatory(a.name)) ||
+            (previous && a.point && b.point
+              ? distanceLowerBound(previous, a.point) - distanceLowerBound(previous, b.point)
+              : 0)
+          );
+        });
         const place = remaining[0]!;
         let start = cursor;
         const weekday = new Date(`${day.date}T00:00:00Z`).getUTCDay();
@@ -213,7 +245,7 @@ export function buildAutoPlan(
           if (!window) break;
           start = Math.max(start, window.start);
         }
-        if (start + 90 > 18 * 60 || place.closedDates.includes(day.date)) break;
+        if (start + 90 > latest || place.closedDates.includes(day.date)) break;
         remaining.shift();
         if (place.quote) costs.add(place.quote.id);
         day.items.push(
@@ -230,8 +262,11 @@ export function buildAutoPlan(
         cursor = start + 120;
         previous = place.point;
       }
-      const last = Math.max(12 * 60, ...day.items.map((item) => item.endMinute + 30));
-      if (last + 60 <= 20 * 60)
+      const last = Math.max(
+        12 * 60,
+        ...day.items.filter((item) => !returns.includes(item)).map((item) => item.endMinute + 30),
+      );
+      if (last + 60 <= Math.min(20 * 60, ...returns.map((item) => item.startMinute - 30)))
         day.items.push(
           activity('用餐与休息（地点待确认）', 'meal', last, last + 60, {
             notes: '餐厅、餐费和饮食限制待确认',

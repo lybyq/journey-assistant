@@ -2,7 +2,9 @@
 
 完整产品目标：为自由行、自驾游、跟团游生成有来源、可调整、费用可比较的旅行方案。
 
-当前已实现完整旅行规划链路，代码位于 `feature/remaining-modules` 分支，包含旅行需求、证据、交通、自驾、住宿游玩、旅行团、整数预算、行程验证、版本、地图、分享与中文PDF。学习从 [真实链路学习指南](docs/LEARNING.md) 开始，验收范围见 [验证记录](docs/VERIFICATION.md)。
+当前已实现旅行规划工程链路，代码位于 `feature/remaining-modules` 分支，包含旅行需求、证据、交通、自驾、住宿游玩、旅行团、整数预算、行程验证、版本、地图、分享与中文PDF。学习从 [真实链路学习指南](docs/LEARNING.md) 开始，验收范围见 [验证记录](docs/VERIFICATION.md)。
+
+国内改造以[一键出行 Spec](docs/specs/domestic-one-click-travel.md)为准，新增方案比较、选择、时间轴、费用来源和平台查询交接；学习入口见[国内安排链路](docs/DOMESTIC-PLANNING.md)。当前12306 MCP仅查询，高德地点不是可订库存，美团/携程/去哪儿等商业商品接口仍需申请授权。平台查询首页不能称为商品预订链接。
 
 ## 快速启动
 

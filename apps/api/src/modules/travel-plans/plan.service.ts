@@ -38,6 +38,8 @@ export class PlanService {
     input: PlanDraft,
     reason = '保存行程草案',
     parentId: string | null = null,
+    /** 多方案工作流在用户选择前保留原版本指针。 */
+    activate = true,
   ): Promise<PlanVersion> {
     const workspace = await this.repository.get(userId, id);
     const draft = planDraftSchema.parse(input);
@@ -90,36 +92,42 @@ export class PlanService {
       : violations.length
         ? 'needs_confirmation'
         : 'validated';
-    return this.repository.saveVersion(userId, id, revision, (version) => ({
-      id: randomUUID(),
-      tripId: id,
-      version,
-      parentId,
-      createdAt: new Date().toISOString(),
-      reason,
-      draft,
-      violations,
-      status,
-      budget,
-      prices: items.filter((item) => item.selected),
-      rates: doc.rates,
-      reserveBps: doc.reserveBps,
-      sources: doc.evidence.filter((source) =>
-        new Set([
-          ...draft.days.flatMap((day) => day.items.flatMap((item) => item.evidenceIds)),
-          ...items.filter((item) => item.selected).flatMap((item) => item.evidenceIds),
-        ]).has(source.id),
-      ),
-      comparisonKey: createHash('sha256')
-        .update(
-          JSON.stringify({
-            ...requestConditions(request),
-            currency: request.budget.currency,
-            reserveBps: doc.reserveBps,
-          }),
-        )
-        .digest('hex'),
-    }));
+    return this.repository.saveVersion(
+      userId,
+      id,
+      revision,
+      (version) => ({
+        id: randomUUID(),
+        tripId: id,
+        version,
+        parentId,
+        createdAt: new Date().toISOString(),
+        reason,
+        draft,
+        violations,
+        status,
+        budget,
+        prices: items.filter((item) => item.selected),
+        rates: doc.rates,
+        reserveBps: doc.reserveBps,
+        sources: doc.evidence.filter((source) =>
+          new Set([
+            ...draft.days.flatMap((day) => day.items.flatMap((item) => item.evidenceIds)),
+            ...items.filter((item) => item.selected).flatMap((item) => item.evidenceIds),
+          ]).has(source.id),
+        ),
+        comparisonKey: createHash('sha256')
+          .update(
+            JSON.stringify({
+              ...requestConditions(request),
+              currency: request.budget.currency,
+              reserveBps: doc.reserveBps,
+            }),
+          )
+          .digest('hex'),
+      }),
+      activate,
+    );
   }
   /** 初排逻辑是独立纯函数，读取真实候选后仍经过相同的保存与校验入口。 */
   async generate(

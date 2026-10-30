@@ -15,6 +15,9 @@ export const transportOptionSchema = z
   .object({
     id: z.string().uuid(),
     mode: z.enum(['rail', 'flight', 'transfer']),
+    /** 查询时的城市/车站语义用于去返程组合，不能只按发车日期猜方向。 */
+    queryOrigin: z.string().max(120).optional(),
+    queryDestination: z.string().max(120).optional(),
     label: shortText,
     origin: shortText,
     destination: shortText,
@@ -85,7 +88,7 @@ export const drivingRouteSchema = z
     restMinutes: z.number().int().min(0),
     chargingMinutes: z.number().int().min(0),
     totalMinutes: z.number().int().min(0),
-    energyMinor: minorSchema,
+    energyMinor: minorSchema.nullable(),
     knownVehicleMinor: minorSchema,
     unknownCosts: z.array(z.string()).max(10),
     perPersonMinor: minorSchema.nullable(),

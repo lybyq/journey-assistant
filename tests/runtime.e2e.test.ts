@@ -336,7 +336,7 @@ describe('持久化对话持久化运行验收', () => {
         [id],
       );
       expect(
-        rows.rows.every((row) => row.executor === 'agent' && row.prompt_version === 'journey-v2.3'),
+        rows.rows.every((row) => row.executor === 'agent' && row.prompt_version === 'journey-v2.4'),
       ).toBe(true);
       expect(
         (
@@ -801,7 +801,7 @@ describe('持久化对话持久化运行验收', () => {
       (await db.query('SELECT recovery_attempts FROM runs WHERE id=$1', [run.id])).rows[0]
         .recovery_attempts,
     ).toBe(1);
-    expect((await db.query('SELECT name FROM journey_migrations')).rows).toHaveLength(6);
+    expect((await db.query('SELECT name FROM journey_migrations')).rows).toHaveLength(7);
   }, 20000);
   /** 两个独立仓储身份竞争时只能一个取得租约，旧身份不能追加任何消息或终态。 */
   it('接管原子化、旧进程围栏和恢复次数上限', async () => {

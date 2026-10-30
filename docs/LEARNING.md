@@ -2,22 +2,23 @@
 
 旅行规划完整链路已有实现；外部库存是否可用仍取决于实际供应商授权。当前客户端是Vue 3 Web，微信小程序适配是单独后续工作。
 
-| 主题                 | 学习入口                           |
-| -------------------- | ---------------------------------- |
-| 工程底座             | [FOUNDATION.md](FOUNDATION.md)     |
-| 身份与存储           | [IDENTITY.md](IDENTITY.md)         |
-| 持久化对话与实时流   | [CONVERSATION.md](CONVERSATION.md) |
-| Deep Agents编排      | [AGENT.md](AGENT.md)               |
-| MCP工具中心          | [MCP.md](MCP.md)                   |
-| 画像与需求澄清       | [TRIP-REQUEST.md](TRIP-REQUEST.md) |
-| 资料与证据           | [RESEARCH.md](RESEARCH.md)         |
-| 交通与接驳           | [TRANSPORT.md](TRANSPORT.md)       |
-| 自驾与车辆费用       | [DRIVING.md](DRIVING.md)           |
-| 住宿、门票与餐饮     | [EXPERIENCES.md](EXPERIENCES.md)   |
-| 旅行团条款           | [TOURS.md](TOURS.md)               |
-| 确定性预算           | [PRICING.md](PRICING.md)           |
-| 生成、验证与版本     | [PLANS.md](PLANS.md)               |
-| 分享、导出与运行保障 | [DELIVERY.md](DELIVERY.md)         |
+| 主题                 | 学习入口                                     |
+| -------------------- | -------------------------------------------- |
+| 国内一键安排         | [DOMESTIC-PLANNING.md](DOMESTIC-PLANNING.md) |
+| 工程底座             | [FOUNDATION.md](FOUNDATION.md)               |
+| 身份与存储           | [IDENTITY.md](IDENTITY.md)                   |
+| 持久化对话与实时流   | [CONVERSATION.md](CONVERSATION.md)           |
+| Deep Agents编排      | [AGENT.md](AGENT.md)                         |
+| MCP工具中心          | [MCP.md](MCP.md)                             |
+| 画像与需求澄清       | [TRIP-REQUEST.md](TRIP-REQUEST.md)           |
+| 资料与证据           | [RESEARCH.md](RESEARCH.md)                   |
+| 交通与接驳           | [TRANSPORT.md](TRANSPORT.md)                 |
+| 自驾与车辆费用       | [DRIVING.md](DRIVING.md)                     |
+| 住宿、门票与餐饮     | [EXPERIENCES.md](EXPERIENCES.md)             |
+| 旅行团条款           | [TOURS.md](TOURS.md)                         |
+| 确定性预算           | [PRICING.md](PRICING.md)                     |
+| 生成、验证与版本     | [PLANS.md](PLANS.md)                         |
+| 分享、导出与运行保障 | [DELIVERY.md](DELIVERY.md)                   |
 
 ## 建议学习方法
 

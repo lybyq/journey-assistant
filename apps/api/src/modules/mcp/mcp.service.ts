@@ -332,7 +332,18 @@ export class McpService implements OnModuleDestroy {
                 const detail =
                   typeof data === 'string'
                     ? data
-                    : String(record?.info ?? record?.message ?? '供应商返回业务拒绝');
+                    : String(
+                        record?.info ??
+                          record?.message ??
+                          (typeof record?.error === 'string'
+                            ? record.error
+                            : record?.error &&
+                                typeof record.error === 'object' &&
+                                'message' in record.error
+                              ? record.error.message
+                              : undefined) ??
+                          '供应商返回业务拒绝',
+                      );
                 throw new McpToolError('MCP_PROVIDER_REJECTED', this.safety.text(detail, 500));
               }
               /** 先生成唯一公开信封，搜索许可必须与模型实际看见的链接一致。 */

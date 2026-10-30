@@ -456,7 +456,7 @@ beforeAll(async () => {
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify({ status: '0', info: 'INVALID_USER_KEY fixture' }),
+                  text: JSON.stringify({ error: { message: 'INVALID_USER_KEY fixture' } }),
                 },
               ],
             }

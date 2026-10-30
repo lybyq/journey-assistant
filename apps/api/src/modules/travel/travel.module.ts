@@ -61,10 +61,17 @@ import {
   PublicShareRateGuard,
   TravelStatusController,
 } from '../travel-delivery/delivery.controller.js';
+/** 国内决策工作流与查询、选择接口。 */
+import { DomesticPlanningService } from '../domestic-planning/domestic-planning.service.js';
+import {
+  DomesticCatalogController,
+  DomesticPlanningController,
+} from '../domestic-planning/domestic-planning.controller.js';
 /** 模块内部没有对AgentModule的运行时反向依赖。 */
 @Module({
   imports: [IdentityModule, McpModule],
   providers: [
+    DomesticPlanningService,
     TravelRateGuard,
     TravelRepository,
     TravelService,
@@ -86,6 +93,8 @@ import {
     PublicShareRateGuard,
   ],
   controllers: [
+    DomesticCatalogController,
+    DomesticPlanningController,
     TripRequestController,
     ResearchController,
     TransportController,

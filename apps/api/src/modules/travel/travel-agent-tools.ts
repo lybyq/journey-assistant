@@ -1,7 +1,7 @@
 /** 公开投影保留票价等关键事实，完整领域文档不重复塞入模型上下文。 */
 import { travelToolSummary } from './tool-summary.js';
 /** 把完整业务服务装成LangChain工具，不在提示词里假装实现业务。 */
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional } from '@nestjs/common';
 /** 使用真实LangChain tool构造器，SDK负责解析tool_calls。 */
 import { tool } from 'langchain';
 /** 模型参数与HTTP共用严格Zod契约。 */
@@ -23,6 +23,9 @@ import {
 /** 工具ID只生成随机值，不接受模型伪造用户身份。 */
 import { randomUUID } from 'node:crypto';
 /** 类型导入不会形成运行时AgentModule循环依赖。 */
+import { domesticDecisionSummary } from '../domestic-planning/decision-summary.js';
+import { DomesticPlanningService } from '../domestic-planning/domestic-planning.service.js';
+import type { PublishEvent } from '../agent/execution.types.js';
 import type { AgentInput } from '../agent/execution.types.js';
 /** 业务、归属和安全层分别依赖注入。 */
 import { TravelService } from './travel.service.js';
@@ -64,9 +67,10 @@ export class TravelAgentTools {
     private readonly plans: PlanService,
     private readonly operations: TravelOperations,
     private readonly mcp: McpService,
+    @Optional() private readonly domestic?: DomesticPlanningService,
   ) {}
   /** 客户端和模型都不能指定userId或任意tripId，身份从真实AgentInput闭包取得。 */
-  forRun(input: AgentInput, signal: AbortSignal, readOnly = false) {
+  forRun(input: AgentInput, signal: AbortSignal, readOnly = false, publish?: PublishEvent) {
     /** 同轮保存操作串行读取最新revision，避免模型并行调用多个查询时自相冲突。 */
     let writes: Promise<unknown> = Promise.resolve();
     const serial = <T>(work: () => Promise<T>): Promise<T> => {
@@ -150,6 +154,52 @@ export class TravelAgentTools {
       },
     );
     if (readOnly) return [read, budget, capabilities];
+    /** 一次工具调用完成有界采集、候选组合、验证和落库；公开进度不包含隐藏推理。 */
+    const arrange = tool(
+      async () =>
+        serial(async () => {
+          if (!this.domestic) throw new BadRequestException('国内安排服务未启用');
+          const trip = await requireTrip();
+          const decision = await this.domestic.arrange(input.userId, trip.id, signal, publish);
+          return result(domesticDecisionSummary(decision));
+        }),
+      {
+        name: 'journey_arrange',
+        description:
+          '中国内地一键安排：需求保存后一次执行铁路、地点和官方资料查询，基于真实候选生成最多三套不同方案，验证并保存。缺商业库存不虚构价格；不下单不付款。',
+        schema: z.object({}).strict(),
+      },
+    );
+    /** 用户明确说“选第二套”时定位当前有效集合，服务端仍核验归属、版本状态与CAS。 */
+    const selectOption = tool(
+      async (args) =>
+        serial(async () => {
+          if (!this.domestic) throw new BadRequestException('国内安排服务未启用');
+          const trip = await requireTrip();
+          const current = await this.domestic.decision(input.userId, trip.id);
+          const option = current.optionSet?.options[args.index - 1];
+          if (!option) throw new BadRequestException('当前没有该序号方案，请重新查看候选');
+          const saved = await this.domestic.select(
+            input.userId,
+            trip.id,
+            trip.revision,
+            option.version.id,
+          );
+          return result({
+            ...domesticDecisionSummary(saved),
+            updatedAt: saved.workspace.updatedAt,
+            selectedVersionId: saved.workspace.activeVersionId,
+            label: option.label,
+            bookingConfirmed: false,
+          });
+        }),
+      {
+        name: 'journey_option_select',
+        description:
+          '仅在用户明确选择第几套方案时使用。选定当前有效候选，不预订不付款；旧需求或行程冲突会拒绝。',
+        schema: z.object({ index: z.number().int().min(1).max(3) }).strict(),
+      },
+    );
     /** 所有修改在运行内依次读取最新revision，网页跨标签修改仍由原CAS拒绝覆盖。 */
     const update = tool(
       async (args) =>
@@ -456,6 +506,8 @@ export class TravelAgentTools {
       },
     );
     return [
+      arrange,
+      selectOption,
       read,
       capabilities,
       update,

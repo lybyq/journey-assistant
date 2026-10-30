@@ -49,7 +49,7 @@ import { TourService } from '../apps/api/dist/modules/travel-tours/tour.service.
 /** OAuth与HTTP客户端只改传输依赖，不放开生产任意URL。 */
 import { SupplierService } from '../apps/api/dist/modules/travel-suppliers/supplier.service.js';
 /** 查询日期以当日上海日期生成，避免测试随时间失效。 */
-import { shanghaiDate } from '../apps/api/dist/modules/trip-request/request.service.js';
+import { shanghaiDate, addDays } from '../apps/api/dist/modules/trip-request/request.service.js';
 /** 随机数据库只属于本次测试。 */
 const name = `journey_supplier_test_${randomUUID().replaceAll('-', '')}`;
 const adminUrl =
@@ -340,8 +340,8 @@ beforeAll(async () => {
         value = [
           {
             start_train_code: 'G123',
-            start_date: shanghaiDate(),
-            arrive_date: shanghaiDate(),
+            start_date: addDays(shanghaiDate(), -2),
+            arrive_date: addDays(shanghaiDate(), -2),
             start_time: '09:00',
             arrive_time: '11:00',
             lishi: '02:00',
@@ -564,6 +564,8 @@ describe('旅行服务供应商协议链路', () => {
       bufferMinutes: 40,
       egressMinutes: 20,
     });
+    expect(option.departure?.slice(0, 10)).toBe(shanghaiDate());
+    expect(option.arrival?.slice(0, 10)).toBe(shanghaiDate());
     expect(option.quote).toMatchObject({
       unitAmountMinor: 10050,
       quantity: 2,
@@ -714,6 +716,29 @@ describe('旅行服务供应商协议链路', () => {
     });
     expect(route.path).toHaveLength(3);
   });
+  /** 没有车辆能耗信息也能先看真实路线，但不能制造零元能源预算。 */
+  it('自驾只查路线时保持全部车辆费用未知，并拒绝参与完整总价比较', async () => {
+    trip = await repository.get(owner, trip.id);
+    const saved = await driving.preview(
+      owner,
+      trip.id,
+      trip.revision,
+      { lng: 120.1, lat: 30.2, coordinateSystem: 'GCJ-02' },
+      { lng: 120.6, lat: 31.3, coordinateSystem: 'GCJ-02' },
+      new AbortController().signal,
+    );
+    const route = saved.document.driving.at(-1)!;
+    expect(route.driveMinutes).toBe(180);
+    expect(route.energyMinor).toBeNull();
+    expect(route.unknownCosts).toHaveLength(5);
+    expect(
+      route.costs.every((cost) => cost.unitAmountMinor === null && cost.priceType === 'unknown'),
+    ).toBe(true);
+    expect(route.perPersonMinor).toBeNull();
+    expect(route.path).toHaveLength(0);
+    trip = saved;
+  });
+
   /** 真正取消底层工具连接，不能把UI停止当取消。 */
   it('超时中断实际供应商连接且不保存半条路线', async () => {
     const before = trip.document.driving.length;

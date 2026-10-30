@@ -52,6 +52,8 @@ export class ExperienceService {
     revision: number,
     input: ReturnType<typeof placeQuerySchema.parse>,
     signal: AbortSignal,
+    /** 自动安排只取少量主地点，避免附属POI挤占资料和路线预算。 */
+    maxResults = 6,
   ) {
     const workspace = await this.repository.get(userId, id);
     if (workspace.revision !== revision) throw new BadRequestException('项目已更新，请刷新');
@@ -62,7 +64,14 @@ export class ExperienceService {
         city: input.city,
       }),
     );
-    const pois = asRecords(raw.pois ?? asRecord(raw.data).pois).slice(0, 6);
+    const pois = asRecords(raw.pois ?? asRecord(raw.data).pois)
+      .filter(
+        (poi) =>
+          input.kind !== 'attraction' ||
+          !/公交站|地铁站|停车场|售票处|检票|出入口/.test(String(poi.name ?? '')),
+      )
+      .filter((poi, index, all) => all.findIndex((other) => other.name === poi.name) === index)
+      .slice(0, Math.max(1, Math.min(6, maxResults)));
     if (!pois.length) throw new BadRequestException('高德未返回可用地点');
     const located = pois
       .slice(0, 3)

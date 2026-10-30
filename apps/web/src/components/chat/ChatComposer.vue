@@ -364,4 +364,41 @@ textarea::placeholder {
 .composer-footnote {
   margin: 6px 0 0;
 }
+/** 方案视图将编辑器缩为一行，当前出行偏好仍由项目上下文同步。 */
+.canvas-composer .composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+}
+.canvas-composer .mode-list,
+.canvas-composer .composer-actions > span {
+  display: none;
+}
+.canvas-composer .composer textarea {
+  height: 40px;
+  min-height: 40px;
+  padding: 4px 2px;
+  line-height: 1.6;
+}
+.canvas-composer .composer-actions {
+  gap: 7px;
+  margin: 0;
+}
+.canvas-composer .composer:focus-within textarea {
+  height: 72px;
+  min-height: 72px;
+}
+@media (max-width: 650px) {
+  .canvas-composer .arrange-button {
+    display: none;
+  }
+  .canvas-composer .composer {
+    gap: 8px;
+  }
+  .canvas-composer .composer textarea {
+    font-size: 16px;
+  }
+}
 </style>

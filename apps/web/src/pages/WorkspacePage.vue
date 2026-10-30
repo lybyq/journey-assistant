@@ -322,7 +322,7 @@ onMounted(() => {
               </button>
             </div>
             <!-- 清楚标注当前保存范围，避免把元数据当完整消息历史。 -->
-            <p v-if="identity.selectedId" class="conversation-scope">
+            <p v-if="identity.selectedId && canvas === 'chat'" class="conversation-scope">
               需求、路线、预算都可以接着聊；展开执行记录查看工具与来源。
             </p>
             <div
@@ -396,10 +396,14 @@ onMounted(() => {
             <!-- 输入通过明确的props和事件接到诊断会话。 -->
             <ChatComposer
               v-model="draft"
+              :class="{ 'canvas-composer': canvas === 'plans' }"
               :busy="chat.busy || submitting"
               :pending="submitting"
               :connected="canSubmit"
-              :preferred-mode="identity.profile?.preferredMode"
+              :preferred-mode="
+                domestic.decision.value?.workspace?.document.request.mode ??
+                identity.profile?.preferredMode
+              "
               @submit="
                 async (message) => {
                   canvas = 'chat';

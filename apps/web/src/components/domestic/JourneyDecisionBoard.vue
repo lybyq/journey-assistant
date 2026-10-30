@@ -339,4 +339,18 @@ const adjustments = [
     padding: 11px 18px;
   }
 }
+/** 精简头部留白，让首屏能同时看到候选的价格、状态与取舍。 */
+.decision-hero {
+  padding: 6px 0 18px;
+}
+.decision-hero h2 {
+  margin: 12px 0 8px;
+  font-size: clamp(28px, 3vw, 40px);
+}
+.decision-hero p {
+  margin: 8px 0;
+}
+.decision-board {
+  padding-top: 6px;
+}
 </style>

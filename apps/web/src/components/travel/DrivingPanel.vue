@@ -5,6 +5,7 @@ import { computed, reactive } from 'vue';
 /** 路线与地点契约来自共享包。 */
 import type { DrivingRoute, Experience } from '@journey/contracts';
 /** 金额与时间仅格式化。 */
+import DrivingComparisonTable from '@/components/domestic/DrivingComparisonTable.vue';
 import { money, minutes } from '@/features/travel/format';
 /** 地点候选来自住宿游玩真实查询。 */
 const props = defineProps<{
@@ -157,8 +158,8 @@ function submit() {
           />
         </label>
         <label>
-          每辆全程过路费（元）
-          <input v-model="form.toll" placeholder="未知留空，确认无需填0" />
+          每辆单程过路费假设（元，可选）
+          <input v-model="form.toll" placeholder="留空自动查询高德估算；手填将覆盖" />
         </label>
         <label>
           每辆全程停车费（元）
@@ -197,6 +198,7 @@ function submit() {
     <div v-if="!routes.length" class="trip-empty">
       尚未查询路线。未知路费会保留为待确认，不自动填零。
     </div>
+    <DrivingComparisonTable :routes="routes" />
     <article v-for="route in routes" :key="route.id" class="drive-result">
       <div class="drive-stat">
         <strong>

@@ -43,6 +43,8 @@ const environmentSchema = z.object({
   LLM_BASE_URL: z.union([z.literal(''), z.string().url()]).default(''),
   /** 外部工具密钥不能被公开健康接口序列化。 */
   AMAP_MAPS_API_KEY: z.string().default(''),
+  /** 可选独立Web服务Key；留空时沿用MCP的Web服务类型Key。 */
+  AMAP_WEB_SERVICE_API_KEY: z.string().default(''),
   TAVILY_API_KEY: z.string().default(''),
   /** Amadeus授权凭据只在后端；test环境结果不能标成生产库存。 */
   AMADEUS_CLIENT_ID: z.string().default(''),

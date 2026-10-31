@@ -47,6 +47,20 @@ function seatComfort(option: TransportOption): number {
 /** 每个策略独立挑选真实候选，再按选择签名去重。 */
 export function domesticCandidates(document: TripDocument) {
   const request = document.request;
+  /** 自动规划只比较当前起终点最近一轮的实际路线，旧报价不挤占新查询。 */
+  const matchingRoutes = document.driving.filter(
+    (route) =>
+      (!route.queryOrigin || route.queryOrigin === request.origin) &&
+      (!route.queryDestination || route.queryDestination === request.destination),
+  );
+  const latestRoute = [...matchingRoutes].sort(
+    (a, b) => Date.parse(b.checkedAt) - Date.parse(a.checkedAt),
+  )[0];
+  const routes = latestRoute?.comparisonGroupId
+    ? matchingRoutes.filter((route) => route.comparisonGroupId === latestRoute.comparisonGroupId)
+    : matchingRoutes;
+  const knownVehicleCost = (route: (typeof document.driving)[number]) =>
+    route.costs.some((cost) => cost.unitAmountMinor !== null) ? route.knownVehicleMinor : Infinity;
   const strategies = ['economy', 'balanced', 'comfort'] as const;
   const labels = { economy: '预算优先', balanced: '均衡安排', comfort: '舒适优先' };
   const result: {
@@ -112,10 +126,13 @@ export function domesticCandidates(document: TripDocument) {
     )[0];
     const modes = request.mode ? [request.mode] : (['independent', 'driving', 'group'] as const);
     for (const mode of modes) {
-      const route = [...document.driving].sort((a, b) =>
+      const route = [...routes].sort((a, b) =>
         strategy === 'economy'
-          ? a.knownVehicleMinor - b.knownVehicleMinor
-          : a.totalMinutes - b.totalMinutes,
+          ? knownVehicleCost(a) - knownVehicleCost(b)
+          : strategy === 'balanced'
+            ? Number(b.strategy === 'recommended') - Number(a.strategy === 'recommended') ||
+              a.totalMinutes - b.totalMinutes
+            : a.driveMinutes - b.driveMinutes,
       )[0];
       const tour = [...document.tours]
         .filter((entry) => entry.departureDate === request.startDate && entry.days === request.days)
@@ -141,7 +158,8 @@ export function domesticCandidates(document: TripDocument) {
         experienceIds: visits.slice(0, maxVisits).map((place) => place.id),
         costIds: document.costs
           .filter(
-            (cost) => cost.selected && !['transport', 'lodging', 'tour'].includes(cost.category),
+            (cost) =>
+              cost.selected && !['transport', 'lodging', 'tour', 'driving'].includes(cost.category),
           )
           .map((cost) => cost.id),
       });
@@ -152,11 +170,17 @@ export function domesticCandidates(document: TripDocument) {
         strategy,
         label: labels[strategy],
         reason:
-          strategy === 'economy'
-            ? '优先参考已知单价；缺价时不承诺总价最低。'
-            : strategy === 'comfort'
-              ? '优先明确席别舒适度和可用数据，保留必去点，适当减少可选活动。'
-              : '优先门到门耗时与已有候选的可行性，时间和费用仍需按来源条件核对。',
+          mode === 'driving'
+            ? strategy === 'economy'
+              ? '优先参考已知车辆费用，缺能源或其他费用时不承诺总价最低。'
+              : strategy === 'balanced'
+                ? '优先高德推荐路线，费用、休息和预约条件仍需核对。'
+                : '优先较短驾驶时长，并保留必去点与休息；不等于保证适合所有人。'
+            : strategy === 'economy'
+              ? '优先参考已知单价；缺价时不承诺总价最低。'
+              : strategy === 'comfort'
+                ? '优先明确席别舒适度和可用数据，保留必去点，适当减少可选活动。'
+                : '优先门到门耗时与已有候选的可行性，时间和费用仍需按来源条件核对。',
         input,
       });
       if (result.length === 3) return result;

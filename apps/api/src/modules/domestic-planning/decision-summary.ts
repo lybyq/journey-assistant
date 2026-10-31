@@ -44,6 +44,22 @@ export function domesticDecisionSummary(decision: DomesticDecision) {
               checkedAt: price?.checkedAt ?? item.checkedAt,
             };
           }),
+        driving: decision.workspace?.document.driving
+          .filter((route) => ids.has(route.id))
+          .map((route) => ({
+            strategy: route.strategy,
+            scope: route.tripScope ?? 'one_way',
+            distanceMeters: route.distanceMeters,
+            driveMinutes: route.driveMinutes,
+            restMinutes: route.restMinutes,
+            tollPerVehicleMinor:
+              version.prices.find((price) =>
+                route.costs.some((cost) => cost.id === price.id && cost.scopeKey.endsWith(':toll')),
+              )?.unitAmountMinor ?? null,
+            knownVehicleMinor: route.knownVehicleMinor,
+            unknownCosts: route.unknownCosts,
+            checkedAt: route.checkedAt,
+          })),
         dayCount: version.draft.days.length,
         daysPreview: version.draft.days.slice(0, 3).map((day) => ({
           date: day.date,

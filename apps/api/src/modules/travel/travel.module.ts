@@ -27,6 +27,7 @@ import { TransportService } from '../travel-transport/transport.service.js';
 /** 交通查询接口。 */
 import { TransportController } from '../travel-transport/transport.controller.js';
 /** 自驾规划。 */
+import { AmapDrivingClient } from '../travel-driving/amap-driving.client.js';
 import { DrivingService } from '../travel-driving/driving.service.js';
 /** 自驾规划接口。 */
 import { DrivingController } from '../travel-driving/driving.controller.js';
@@ -80,6 +81,7 @@ import {
     TripRequestService,
     ResearchService,
     TransportService,
+    AmapDrivingClient,
     DrivingService,
     ExperienceService,
     TourService,

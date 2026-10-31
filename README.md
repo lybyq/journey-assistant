@@ -4,7 +4,7 @@
 
 当前已实现旅行规划工程链路，代码位于 `feature/remaining-modules` 分支，包含旅行需求、证据、交通、自驾、住宿游玩、旅行团、整数预算、行程验证、版本、地图、分享与中文PDF。学习从 [真实链路学习指南](docs/LEARNING.md) 开始，验收范围见 [验证记录](docs/VERIFICATION.md)。
 
-国内改造以[一键出行 Spec](docs/specs/domestic-one-click-travel.md)为准，新增方案比较、选择、时间轴、费用来源和平台查询交接；学习入口见[国内安排链路](docs/DOMESTIC-PLANNING.md)。当前12306 MCP仅查询，高德地点不是可订库存，美团/携程/去哪儿等商业商品接口仍需申请授权。平台查询首页不能称为商品预订链接。
+国内改造的工程链路见[一键出行 Spec](docs/specs/domestic-one-click-travel.md)，商品聚合核心以[商品聚合与综合决策 Spec](docs/specs/domestic-offer-aggregation.md)为准。住宿、餐饮、门票的国内多平台商品比价尚未实现，既缺少真实生产适配器，也缺少实体/SKU归一与验价引擎；渠道目录和行程卡片不代表这些能力已经完成。学习入口见[国内安排链路](docs/DOMESTIC-PLANNING.md)。当前12306 MCP仅查询，高德地点不是可订库存，平台查询首页不能称为商品预订链接。自驾已支持同一起终点的多路线、收费估算与已知车辆费用比较，范围为单程，缺项仍保留未知。
 
 ## 快速启动
 

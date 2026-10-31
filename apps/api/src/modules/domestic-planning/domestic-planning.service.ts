@@ -386,7 +386,15 @@ export class DomesticPlanningService {
           );
       } else warnings.push('铁路日期不在当前可查询窗口内，先安排目的地，车票待起售后查询。');
     }
-    if (req.mode === 'driving' && !trip.document.driving.length)
+    if (
+      req.mode === 'driving' &&
+      !trip.document.driving.some(
+        (route) =>
+          route.queryOrigin === req.origin &&
+          route.queryDestination === req.destination &&
+          Date.now() - Date.parse(route.checkedAt) < 15 * 60000,
+      )
+    )
       await step('查询城市间自驾路线', async () => {
         const call = await this.queries.session(lookupSignal);
         const locate = async (address: string) => {

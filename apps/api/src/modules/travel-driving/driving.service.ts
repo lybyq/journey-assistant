@@ -1,6 +1,8 @@
 /** 真实高德路线与确定性车辆费用，车辆总费和人均费用严格分开。 */
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional } from '@nestjs/common';
 /** 路线和费用ID由服务端生成，不能把模型编造ID当作证据。 */
+import { AmapDrivingClient } from './amap-driving.client.js';
+import { drivingCandidates, routeTollMinor } from './driving-candidates.js';
 import { randomUUID } from 'node:crypto';
 /** 入参、结果和费用都经过共享契约。 */
 import {
@@ -35,6 +37,7 @@ export class DrivingService {
   constructor(
     private readonly repository: TravelRepository,
     private readonly mcp: TravelMcpService,
+    @Optional() private readonly webRoutes?: AmapDrivingClient,
   ) {}
   /** 未提供车辆能耗时先保存真实路线，所有费用保持未知，不能以零元假设启动成本计算。 */
   async preview(
@@ -45,76 +48,179 @@ export class DrivingService {
     destination: GeoPoint,
     signal: AbortSignal,
   ) {
-    const workspace = await this.repository.get(userId, id);
-    const request = workspace.document.request;
+    return this.compareAndSave(userId, id, revision, origin, destination, signal);
+  }
+  /** 来源查询与费用构造分开；有Web权限时取得三种策略，否则保留MCP实际备选。 */
+  private async compareAndSave(
+    userId: string,
+    id: string,
+    revision: number,
+    origin: GeoPoint,
+    destination: GeoPoint,
+    signal: AbortSignal,
+    input?: ReturnType<typeof drivingInputSchema.parse>,
+  ) {
+    const workspace = await this.repository.get(userId, id),
+      request = workspace.document.request;
+    if (workspace.revision !== revision) throw new BadRequestException('项目已变化，请刷新');
     if (request.vehicles === null) throw new BadRequestException('请先确认车辆数量');
-    const call = await this.mcp.session(signal);
-    const data = asRecord(
-      await call('amap__maps_direction_driving', {
-        origin: origin.lng + ',' + origin.lat,
-        destination: destination.lng + ',' + destination.lat,
-      }),
-    );
-    const route = asRecord(data.route ?? asRecord(data.data).route ?? data);
-    const path = asRecords(route.paths)[0];
-    const distance = Number(path?.distance),
-      seconds = Number(path?.duration ?? asRecord(path?.cost).duration);
-    if (!Number.isFinite(distance) || distance < 0 || !Number.isFinite(seconds) || seconds < 0)
-      throw new BadRequestException('高德未返回有效自驾距离或时间');
-    const minutes = Math.ceil(seconds / 60),
-      rest = Math.max(0, Math.ceil(minutes / 120) - 1) * 20;
-    const routeId = randomUUID(),
+    const vehicles = request.vehicles,
+      warnings: string[] = [];
+    let paths: Record<string, any>[] = [];
+    let source: 'amap_web' | 'amap_mcp' = 'amap_mcp';
+    if (this.webRoutes?.configured) {
+      try {
+        const result = await this.webRoutes.compare(origin, destination, signal);
+        paths = result.paths;
+        source = result.source;
+        warnings.push(...result.warnings);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        warnings.push('Web策略查询暂不可用，使用MCP已返回路线；未返回的策略不做成功承诺。');
+      }
+    }
+    if (!paths.length) {
+      const call = await this.mcp.session(signal);
+      const raw = asRecord(
+        await call('amap__maps_direction_driving', {
+          origin: origin.lng + ',' + origin.lat,
+          destination: destination.lng + ',' + destination.lat,
+        }),
+      );
+      paths = asRecords(asRecord(raw.route ?? asRecord(raw.data).route ?? raw).paths);
+    }
+    const candidates = drivingCandidates(paths);
+    if (!candidates.length) throw new BadRequestException('高德未返回有效自驾距离或时间');
+    const groupId = randomUUID(),
       now = new Date().toISOString();
-    const costs: CostItem[] = ['能源费', '过路费', '停车费', '租车费', '车辆保险'].map(
-      (label, index) => ({
+    const routes = candidates.map((candidate) => {
+      const routeId = randomUUID();
+      const restEvery = input?.restEveryMinutes ?? 120,
+        restEach = input?.restMinutes ?? 20;
+      const rest = Math.max(0, Math.ceil(candidate.minutes / restEvery) - 1) * restEach;
+      const energy = input
+        ? energyCostMinor(candidate.distance, input.consumptionPer100, input.energyUnitPriceMinor)
+        : null;
+      const toll = input?.tollMinor ?? candidate.toll;
+      const values: [string, string, number | null][] = [
+        ['能源费', 'energy', energy],
+        ['过路费', 'toll', toll],
+        ['停车费', 'parking', input?.parkingMinor ?? null],
+        ['租车费', 'rental', input?.rentalMinor ?? null],
+        ['车辆保险', 'insurance', input?.insuranceMinor ?? null],
+      ];
+      const costs: CostItem[] = values.map(([label, key, amount]) => ({
         id: randomUUID(),
         label,
         category: 'driving',
-        scopeKey: 'driving:' + routeId + ':' + index,
-        priceType: 'unknown',
-        unitAmountMinor: null,
+        scopeKey: 'driving:' + routeId + ':' + key,
+        priceType: amount === null ? 'unknown' : 'estimate',
+        unitAmountMinor: amount,
         currency: 'CNY',
-        quantity: request.vehicles!,
+        quantity: vehicles,
         unit: 'vehicle',
         required: true,
         selected: true,
         includes: [],
         provenance: 'calculation',
-        provider: '高德路线；车辆费用待确认',
-        sourceUrl: null,
+        provider:
+          key === 'toll' && input?.tollMinor == null
+            ? '高德路线收费估算'
+            : '高德路线 + 用户费用假设',
+        sourceUrl:
+          key === 'toll' && input?.tollMinor == null
+            ? 'https://developer.amap.com/api/webservice/guide/api/newroute'
+            : null,
         evidenceIds: [],
         checkedAt: now,
         validUntil: null,
         conditions: requestConditions(request),
-        notes: '仅查询路线；能耗、能源单价和车辆费用尚未提供，不按零元计算。',
-      }),
-    );
-    const result = drivingRouteSchema.parse({
-      id: routeId,
-      origin,
-      destination,
-      waypoints: [],
-      distanceMeters: Math.round(distance),
-      driveMinutes: minutes,
-      restMinutes: rest,
-      chargingMinutes: 0,
-      totalMinutes: minutes + rest,
-      energyMinor: null,
-      knownVehicleMinor: 0,
-      unknownCosts: costs.map((cost) => cost.label),
-      perPersonMinor: null,
-      checkedAt: now,
-      assumptions: [
-        '起终点为用户城市地理编码中心，非精确门到门地址。',
-        '每驾驶120分钟预留20分钟休息，是规划假设，充电时间待确认。',
-      ],
-      warnings: ['全部车辆费用未知；路线为查询时参考，实际起终点、路况与充电需核对。'],
-      path: [],
-      costs,
+        notes:
+          key === 'toll'
+            ? input?.tollMinor != null
+              ? '采用用户明确输入的每车单程路费。'
+              : '高德返回的每车单程收费估算；节假日、车型、ETC优惠及出发日最终收费需核实。'
+            : key === 'energy' && input
+              ? '里程' +
+                candidate.distance +
+                '米；百公里消耗' +
+                input.consumptionPer100 +
+                '；单价来源：' +
+                input.energyPriceSource
+              : '每辆车单程费用；没有数据保持未知，不补零。',
+      }));
+      const unknown = costs
+        .filter((cost) => cost.unitAmountMinor === null)
+        .map((cost) => cost.label);
+      const known = costs.reduce(
+        (sum, cost) => sum + (cost.unitAmountMinor ?? 0) * cost.quantity,
+        0,
+      );
+      const people =
+        request.adults !== null && request.children !== null
+          ? request.adults + request.children
+          : null;
+      return drivingRouteSchema.parse({
+        id: routeId,
+        comparisonGroupId: groupId,
+        queryOrigin: request.origin,
+        queryDestination: request.destination,
+        strategy: candidate.strategy,
+        source,
+        tollMinor: toll,
+        tollSource:
+          input?.tollMinor != null
+            ? 'user_assumption'
+            : candidate.toll === null
+              ? 'unknown'
+              : 'amap_estimate',
+        tollDistanceMeters: candidate.tollDistance,
+        trafficLights: candidate.trafficLights,
+        tripScope: 'one_way',
+        origin,
+        destination,
+        waypoints: [],
+        distanceMeters: candidate.distance,
+        driveMinutes: candidate.minutes,
+        restMinutes: rest,
+        chargingMinutes: input?.chargingMinutes ?? 0,
+        totalMinutes: candidate.minutes + rest + (input?.chargingMinutes ?? 0),
+        energyMinor: energy === null ? null : energy * vehicles,
+        knownVehicleMinor: known,
+        unknownCosts: unknown,
+        perPersonMinor: people && unknown.length === 0 ? Math.ceil(known / people) : null,
+        checkedAt: now,
+        assumptions: [
+          input
+            ? '起终点按用户提交的精确坐标计算。'
+            : '起终点为用户城市地理编码中心，非精确门到门地址。',
+          vehicles +
+            '辆车；每驾驶' +
+            restEvery +
+            '分钟预留' +
+            restEach +
+            '分钟休息；当前仅比较单程。',
+          input ? '能源费采用用户确认的百公里消耗和单价。' : '未提供能耗和单价，能源费用未知。',
+        ],
+        warnings: [
+          ...warnings,
+          '收费和路况是查询时参考，不保证未来出发日；往返及市内费用需要另行计算。',
+          ...(!candidate.points.length ? ['未返回完整道路折线，地图只显示点位示意。'] : []),
+          ...(request.maxDriveMinutes !== null && candidate.minutes > request.maxDriveMinutes
+            ? ['驾驶时长超过已设每日上限，需要拆天。']
+            : []),
+          ...(input?.energy === 'electric' && input.chargingMinutes === 0
+            ? ['电动车充电安排尚需核实。']
+            : []),
+        ],
+        path: candidate.points,
+        costs,
+      });
     });
+    signal.throwIfAborted();
     return this.repository.mutate(userId, id, revision, (doc) => {
-      doc.driving.push(result);
-      doc.costs.push(...costs);
+      doc.driving.push(...routes);
+      doc.costs.push(...routes.flatMap((route) => route.costs));
       return doc;
     });
   }
@@ -126,6 +232,17 @@ export class DrivingService {
     input: ReturnType<typeof drivingInputSchema.parse>,
     signal: AbortSignal,
   ) {
+    /** 无途经点时使用同一多策略比较入口，避免表单查询退回到单路线。 */
+    if (!input.waypoints.length)
+      return this.compareAndSave(
+        userId,
+        id,
+        revision,
+        input.origin,
+        input.destination,
+        signal,
+        input,
+      );
     /** 人数、车辆和驾驶限制使用已保存需求，不把未知人数默认为1。 */
     const workspace = await this.repository.get(userId, id);
     const request = workspace.document.request;
@@ -136,6 +253,7 @@ export class DrivingService {
     const points = [input.origin, ...input.waypoints, input.destination];
     let distance = 0;
     let duration = 0;
+    let returnedTolls: number | null = 0;
     const path: GeoPoint[] = [];
     const warnings: string[] = [];
     /** 逐段查询避免错误假设供应商支持任意途经点参数。 */
@@ -155,6 +273,8 @@ export class DrivingService {
       const seconds = Number(first.duration ?? asRecord(first.cost).duration);
       if (!Number.isFinite(meters) || meters < 0 || !Number.isFinite(seconds) || seconds < 0)
         throw new BadRequestException('供应商路线缺少有效距离或耗时');
+      const legToll = routeTollMinor(first);
+      returnedTolls = returnedTolls === null || legToll === null ? null : returnedTolls + legToll;
       distance += Math.round(meters);
       duration += Math.ceil(seconds / 60);
       let found = false;
@@ -189,7 +309,7 @@ export class DrivingService {
     /** 过路费、停车、租车和保险未知时不默认为0；能源费始终明确为估算。 */
     const values: [string, string, number | null][] = [
       ['能源费', 'energy', energy],
-      ['过路费', 'toll', input.tollMinor],
+      ['过路费', 'toll', input.tollMinor ?? returnedTolls],
       ['停车费', 'parking', input.parkingMinor],
       ['租车费', 'rental', input.rentalMinor],
       ['车辆保险', 'insurance', input.insuranceMinor],
@@ -243,6 +363,9 @@ export class DrivingService {
       restMinutes: rest,
       chargingMinutes: input.chargingMinutes,
       totalMinutes: duration + rest + input.chargingMinutes,
+      tollMinor: input.tollMinor ?? returnedTolls,
+      tripScope: 'one_way',
+      source: 'amap_mcp',
       energyMinor: energy * vehicles,
       knownVehicleMinor: known,
       unknownCosts: unknown,

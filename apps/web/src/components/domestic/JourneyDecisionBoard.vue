@@ -3,6 +3,7 @@
 import { computed, shallowRef, watch } from 'vue';
 import type { DomesticDecision, DomesticProvider } from '@journey/contracts';
 import PlanChoiceCard from './PlanChoiceCard.vue';
+import DrivingComparisonTable from './DrivingComparisonTable.vue';
 import PlanTimeline from './PlanTimeline.vue';
 import BudgetEvidencePanel from './BudgetEvidencePanel.vue';
 import BookingChecklist from './BookingChecklist.vue';
@@ -83,6 +84,14 @@ const adjustments = [
         @preview="previewId = option.version.id"
       />
     </div>
+    <DrivingComparisonTable
+      :routes="decision.workspace?.document.driving ?? []"
+      :selected-ids="
+        preview?.version.draft.days.flatMap((day) =>
+          day.items.flatMap((item) => (item.referenceId ? [item.referenceId] : [])),
+        ) ?? []
+      "
+    />
     <template v-if="preview">
       <section class="itinerary">
         <div class="section-heading">

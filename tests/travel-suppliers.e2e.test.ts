@@ -735,7 +735,7 @@ describe('旅行服务供应商协议链路', () => {
       route.costs.every((cost) => cost.unitAmountMinor === null && cost.priceType === 'unknown'),
     ).toBe(true);
     expect(route.perPersonMinor).toBeNull();
-    expect(route.path).toHaveLength(0);
+    expect(route.path).toHaveLength(3);
     trip = saved;
   });
 

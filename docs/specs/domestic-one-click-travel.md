@@ -1,6 +1,8 @@
 # 国内一键出行助手改造 Spec
 
-状态：工程链路已实现，商业商品接口待授权；调研日期：2026-10-30；验收更新：2026-10-31；范围：中国内地出行，人民币、Asia/Shanghai。国外以及港澳台的跨境票务/证件流程另立 spec。技术栈沿用 NestJS、TypeScript、Deep Agents/LangChain、PostgreSQL、Redis、Vue 3/Vite。
+状态：编排工程链路已实现，商品聚合与跨平台比价核心尚未完成；调研日期：2026-10-30；验收更新：2026-10-31；范围：中国内地出行，人民币、Asia/Shanghai。国外以及港澳台的跨境票务/证件流程另立 spec。技术栈沿用 NestJS、TypeScript、Deep Agents/LangChain、PostgreSQL、Redis、Vue 3/Vite。
+
+新版核心范围与成熟方案对照见[国内商品聚合与综合决策](domestic-offer-aggregation.md)。原验收中的方案生成和渠道目录不代表已经完成商品聚合。
 
 ## 1. Executive Summary
 
